@@ -6,9 +6,9 @@
    - 描画中の線だけは重ねキャンバス(#live)に描き、
      ペンを離したらページのキャッシュへ焼き込む
    ============================================================ */
-import * as db from './db.js?v=6';
-import { drawStroke, drawLiveStroke, isOpacityStroke, bbox, bboxHit, hitStroke, eraseSplit, sweep } from './ink.js?v=6';
-import { pngWithDpi, makeZip } from './zip.js?v=6';
+import * as db from './db.js?v=7';
+import { drawStroke, drawLiveStroke, isOpacityStroke, bbox, bboxHit, hitStroke, eraseSplit, sweep } from './ink.js?v=7';
+import { pngWithDpi, makeZip } from './zip.js?v=7';
 
 const PAGE_W = 2508, PAGE_H = 3541, DPI = 350;
 const GAP = 140;                 // ページ間の隙間(page-px)
@@ -419,6 +419,7 @@ function render() {
   updateZoomPill();
   housekeep(i0, i1);
   if (!drawing) hideInk();
+  else if (isOpacityStroke(drawing.st)) drawOpacityIncremental(true);
 }
 
 /** 見えていないページのキャッシュとストロークを手放す */
@@ -484,7 +485,9 @@ function drawLive() {
   ctx.setTransform(1, 0, 0, 1, 0, 0);
   ctx.clearRect(0, 0, liveCv.width, liveCv.height);
   const k = cam.z * dpr;
-  if (drawing && drawing.pts.length) {
+  if (drawing && drawing.pts.length && isOpacityStroke(drawing.st)) {
+    drawOpacityIncremental(false);
+  } else if (drawing && drawing.pts.length) {
     let tctx = ctx;
     if (settings.lowLatency) {
       ensureInk();
@@ -501,10 +504,6 @@ function drawLive() {
     drawLiveStroke(tctx, drawing.st, pts, false);
     tctx.restore();
     if (settings.lowLatency) inkCv.style.visibility = 'visible';
-    // 濃さが変わる線は darken で重ねる。重ねキャンバス自体も画面と darken 合成して、
-    // 描いている途中に下の濃い線を薄く覆ってしまわないようにする
-    const blend = !settings.lowLatency && isOpacityStroke(drawing.st) ? 'darken' : '';
-    if (liveCv.style.mixBlendMode !== blend) liveCv.style.mixBlendMode = blend;
   }
   if (cursor && (erasing || isEraserTool())) {
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
@@ -518,6 +517,28 @@ function drawLive() {
     ctx.strokeStyle = 'rgba(40,50,60,0.8)';
     ctx.stroke();
   }
+}
+
+/** 濃さが変わる線(描画中)は、重ねキャンバスを使わず画面(view)に直接、増えた区間だけ描き足す。
+ *  darken(濃い方を残す)は同じ所を何度塗っても結果が変わらないので消して描き直す必要が無く、
+ *  毎フレーム全体を描き直すと出ていたチラつきが起きない。予測点は後で消せないので使わない。
+ *  full=true は render() で画面を描き直した直後に、描きかけ全体を載せ直すとき */
+function drawOpacityIncremental(full) {
+  const d = drawing;
+  const n = d.pts.length;
+  if (!n) return;
+  const from = full ? 0 : Math.max(0, (d.drawn || 0) - 1);
+  if (!full && d.drawn && from >= n - 1) return;
+  const ctx = viewCtx;
+  const k = cam.z * dpr;
+  ctx.save();
+  ctx.setTransform(k, 0, 0, k, -cam.x * k, (d.top - cam.y) * k);
+  ctx.beginPath();
+  ctx.rect(0, 0, PAGE_W, PAGE_H);
+  ctx.clip();
+  drawLiveStroke(ctx, d.st, d.pts.slice(from), false);
+  ctx.restore();
+  d.drawn = n;
 }
 
 /* ============================================================
