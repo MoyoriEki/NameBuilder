@@ -35,13 +35,17 @@
     <canvas id="live"></canvas>
   </div>
 
-  <header class="bar topbar">
+  <header id="topbar" class="bar topbar">
     <button id="backBtn" class="ibtn" type="button" title="一覧へ戻る">‹</button>
     <span id="docTitle" class="doc-title"></span>
     <span class="grow"></span>
     <button id="undoBtn" class="ibtn" type="button" title="元に戻す (Ctrl+Z)" disabled>↶</button>
     <button id="redoBtn" class="ibtn" type="button" title="やり直す (Ctrl+Shift+Z)" disabled>↷</button>
-    <button id="pageBtn" class="pill" type="button" title="ページ一覧"><span id="pageNo">1 / 1</span></button>
+    <div class="pagenav">
+      <button id="prevBtn" class="ibtn" type="button">◀</button>
+      <button id="pageBtn" class="pill" type="button" title="ページ一覧"><span id="pageNo">1 / 1</span></button>
+      <button id="nextBtn" class="ibtn" type="button">▶</button>
+    </div>
     <button id="exportBtn" class="ibtn" type="button" title="PNG書き出し">⤓</button>
     <button id="settingsBtn" class="ibtn" type="button" title="設定">⚙</button>
   </header>
@@ -128,15 +132,34 @@
 <!-- ============ 設定 ============ -->
 <dialog id="settingsDlg" class="pop wide">
   <h2>設定</h2>
+  <div class="seg">
+    <span class="muted">ページ表示</span>
+    <label><input type="radio" name="viewMode" value="page"> 送り</label>
+    <label><input type="radio" name="viewMode" value="scroll"> 縦スクロール</label>
+  </div>
+  <div class="seg">
+    <span class="muted">めくる向き</span>
+    <label><input type="radio" name="readDir" value="rtl"> 右開き（漫画: 次のページは左）</label>
+    <label><input type="radio" name="readDir" value="ltr"> 左開き</label>
+  </div>
+  <div class="seg">
+    <span class="muted">メニューバー</span>
+    <label><input type="radio" name="barMode" value="auto"> 自動（横長なら縦）</label>
+    <label><input type="radio" name="barMode" value="top"> 上</label>
+    <label><input type="radio" name="barMode" value="side"> 縦</label>
+  </div>
   <label class="row col">手ブレ補正 <span><output id="stabOut"></output></span>
     <input id="stab" type="range" min="0" max="0.9" step="0.05"></label>
+  <label class="row col">筆圧の上限 <span class="muted small">この強さで最大の太さになる</span> <span><output id="pmaxOut"></output></span>
+    <input id="pmax" type="range" min="0.3" max="1" step="0.05"></label>
+  <p id="pmaxSeen" class="muted small"></p>
   <label class="row col">筆圧カーブ <span class="muted small">左ほど軽い力で太くなる</span> <span><output id="gammaOut"></output></span>
     <input id="gamma" type="range" min="0.4" max="2.5" step="0.05"></label>
   <label class="row"><input id="sideEraser" type="checkbox"> ペンのサイドボタンを押している間は消しゴム</label>
   <label class="row"><input id="fingerDraw" type="checkbox"> 指でも描く（オフ: 指はスクロール・ズーム専用）</label>
   <label class="row"><input id="tapUndo" type="checkbox"> 2本指タップで元に戻す / 3本指タップでやり直す</label>
   <div class="seg">
-    <span class="muted">道具の位置</span>
+    <span class="muted">道具・縦バーの位置</span>
     <label><input type="radio" name="dockSide" value="left"> 左</label>
     <label><input type="radio" name="dockSide" value="right"> 右</label>
   </div>

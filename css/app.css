@@ -121,6 +121,28 @@ button { font: inherit; color: inherit; }
 .tool .mode-badge { position: absolute; right: 3px; bottom: 1px; font-size: 10px; color: var(--muted); }
 
 .zoom-pill { position: absolute; right: 12px; bottom: 12px; z-index: 10; box-shadow: var(--shadow); }
+.pagenav { display: flex; align-items: center; gap: 2px; }
+.pagenav .ibtn { font-size: 14px; min-width: 34px; }
+
+/* ---------- 縦バー(横向きタブレットで表示領域を最大化) ---------- */
+#editor.vbar .topbar {
+  top: 0; bottom: 0; left: 0; right: auto; width: 68px; height: auto;
+  flex-direction: column; padding: 8px 0; gap: 2px;
+  border-bottom: none; border-right: 1px solid var(--line);
+  overflow-y: auto; overscroll-behavior: contain;
+}
+#editor.vbar.side-right .topbar { left: auto; right: 0; border-right: none; border-left: 1px solid var(--line); }
+#editor.vbar .doc-title, #editor.vbar .topbar > .grow { display: none; }
+#editor.vbar .pagenav { flex-direction: column; gap: 2px; margin: 4px 0; }
+#editor.vbar .pagenav .ibtn { height: 32px; }
+#editor.vbar .pill { padding: 0 6px; font-size: 12px; height: 28px; }
+#editor.vbar .dock {
+  position: static; box-shadow: none; background: transparent; border-radius: 0;
+  padding: 8px 0 0; margin-top: 6px; border-top: 1px solid var(--line); align-items: center;
+}
+#editor.vbar .tool { width: 50px; height: 48px; }
+#editor.vbar .tool.small { height: 32px; }
+#editor.vbar.side-right .zoom-pill { right: auto; left: 12px; }
 .toast {
   position: absolute; left: 50%; bottom: 24px; transform: translateX(-50%); z-index: 30;
   background: rgba(30, 34, 40, 0.88); color: #fff; padding: 8px 16px; border-radius: 18px; font-size: 14px;

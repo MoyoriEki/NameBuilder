@@ -42,6 +42,10 @@ const DEFAULTS = {
   fingerDraw: false,
   tapUndo: true,
   dockSide: 'left',
+  viewMode: 'page',   // page=ページ送り / scroll=縦スクロール
+  readDir: 'rtl',     // rtl=右開き(漫画・次のページは左) / ltr=左開き
+  barMode: 'auto',    // auto=横長画面なら縦バー / top / side
+  pmax: 0.7,          // この筆圧で最大の太さになる
 };
 const settings = (() => {
   let s = {};
@@ -85,30 +89,73 @@ function ensureLoaded(id) {
 }
 
 /* ============================================================
-   カメラ(表示位置・倍率)
+   カメラ(表示位置・倍率)とレイアウト
    world座標: ページ i は x=0..PAGE_W, y=i*PITCH..i*PITCH+PAGE_H
    画面(css-px) = (world - cam) * cam.z
+   表示モード:
+     page   … ページ送り。今のページだけを表示し、指で横にスワイプしてめくる
+     scroll … 縦スクロール。全ページを縦に並べる
    ============================================================ */
 const cam = { x: 0, y: 0, z: 0.2 };
 let viewW = 1, viewH = 1, dpr = 1;
 let interacting = false, settleTimer = 0;
+let barVertical = false;           // メニューバーを縦(画面の横端)に置いているか
+const SIDEBAR_W = 68;              // 縦バーの幅(css-px)
+const FLIP_GAP = 48;               // めくり中に隣のページとの間に空ける隙間(css-px)
+const flip = { dx: 0, anim: 0 };   // めくり中の横ずれ(css-px)とアニメーションのID
 
 const pageCount = () => E.doc.pages.length;
 const totalH = () => pageCount() * PITCH - GAP;
-function fitPageZoom() {
-  return Math.min((viewW - 2 * 84) / PAGE_W, (viewH - TOPBAR - 28) / PAGE_H);
+const pageMode = () => settings.viewMode !== 'scroll';
+
+/** 今のページ(送りモード)。ページの並べ替え・削除があってもIDで追いかける */
+function curIndex() {
+  const pages = E.doc.pages;
+  let i = pages.indexOf(E.curId);
+  if (i < 0) {
+    i = clamp(E.curIdx || 0, 0, pages.length - 1);
+    E.curId = pages[i];
+  }
+  E.curIdx = i;
+  return i;
 }
-const zMin = () => fitPageZoom() * 0.25;
+function setCur(i) {
+  E.curIdx = clamp(i, 0, pageCount() - 1);
+  E.curId = E.doc.pages[E.curIdx];
+}
+
+/** ページを置ける画面内の領域(css-px)。バーやドックの分を除く */
+function area() {
+  const m = 12;
+  if (barVertical) {
+    const left = settings.dockSide !== 'right';
+    return {
+      x0: (left ? SIDEBAR_W : 0) + m,
+      x1: viewW - (left ? 0 : SIDEBAR_W) - m,
+      y0: m,
+      y1: viewH - m,
+    };
+  }
+  return { x0: 84, x1: viewW - 84, y0: TOPBAR + 14, y1: viewH - 14 };
+}
+function fitPageZoom() {
+  const a = area();
+  return Math.max(0.01, Math.min((a.x1 - a.x0) / PAGE_W, (a.y1 - a.y0) / PAGE_H));
+}
+const zMin = () => fitPageZoom() * (pageMode() ? 0.5 : 0.25);
 const zMax = () => 2.5;
 
+/** 1軸ぶんの制限: 収まるなら領域の中央、はみ出すなら端から少し先まで動かせる */
+function clampAxis(v, lo, len, a0, a1, z) {
+  const m = 40 / z;
+  if (len <= (a1 - a0) / z) return lo + len / 2 - (a0 + a1) / 2 / z;
+  return clamp(v, lo - a0 / z - m, lo + len + m - a1 / z);
+}
 function clampCam() {
-  const z = cam.z;
-  const vw = viewW / z, vh = viewH / z;
-  const mx = 100 / z;
-  if (PAGE_W + 2 * mx <= vw) cam.x = (PAGE_W - vw) / 2;
-  else cam.x = clamp(cam.x, -mx, PAGE_W + mx - vw);
-  const lo = -(TOPBAR + 160) / z, hi = totalH() + 160 / z - vh;
-  cam.y = lo > hi ? (lo + hi) / 2 : clamp(cam.y, lo, hi);
+  const a = area(), z = cam.z;
+  cam.x = clampAxis(cam.x, 0, PAGE_W, a.x0, a.x1, z);
+  if (pageMode()) cam.y = clampAxis(cam.y, curIndex() * PITCH, PAGE_H, a.y0, a.y1, z);
+  else cam.y = clampAxis(cam.y, 0, totalH(), a.y0, a.y1, z);
 }
 function zoomAt(sx, sy, factor) {
   const wx = cam.x + sx / cam.z, wy = cam.y + sy / cam.z;
@@ -117,19 +164,25 @@ function zoomAt(sx, sy, factor) {
   cam.y = wy - sy / cam.z;
 }
 function showPage(i, z = fitPageZoom()) {
-  cam.z = z;
-  cam.x = PAGE_W / 2 - viewW / 2 / z;
-  cam.y = i * PITCH + PAGE_H / 2 - (TOPBAR + (viewH - TOPBAR) / 2) / z;
+  i = clamp(i, 0, pageCount() - 1);
+  if (pageMode()) setCur(i);
+  const a = area();
+  cam.z = clamp(z, zMin(), zMax());
+  cam.x = PAGE_W / 2 - (a.x0 + a.x1) / 2 / cam.z;
+  cam.y = i * PITCH + PAGE_H / 2 - (a.y0 + a.y1) / 2 / cam.z;
   clampCam();
   requestRender();
 }
 function currentPage() {
-  const cy = cam.y + (TOPBAR + (viewH - TOPBAR) / 2) / cam.z;
+  if (pageMode()) return curIndex();
+  const a = area();
+  const cy = cam.y + (a.y0 + a.y1) / 2 / cam.z;
   return clamp(Math.floor((cy + GAP / 2) / PITCH), 0, pageCount() - 1);
 }
 function pageAt(wx, wy) {
   const i = Math.floor(wy / PITCH);
   if (i < 0 || i >= pageCount()) return null;
+  if (pageMode() && i !== curIndex()) return null;
   const y = wy - i * PITCH;
   return { i, id: E.doc.pages[i], x: wx, y, top: i * PITCH, inside: wx >= 0 && wx <= PAGE_W && y >= 0 && y <= PAGE_H };
 }
@@ -142,8 +195,69 @@ function endInteractionSoon() {
   settleTimer = setTimeout(() => { interacting = false; requestRender(); }, 140);
 }
 
+/* ---- ページ送り ---- */
+const isRtl = () => settings.readDir !== 'ltr';
+/** 画面の左/右にあるページ。右開き(漫画)では次のページが左に来る */
+const leftIndex = () => curIndex() + (isRtl() ? 1 : -1);
+const rightIndex = () => curIndex() + (isRtl() ? -1 : 1);
+const validIndex = (i) => i >= 0 && i < pageCount();
+
+/** めくりアニメーション: flip.dx を to まで動かし、終わったら done() */
+function animateFlip(to, done) {
+  cancelAnimationFrame(flip.anim);
+  const from = flip.dx, t0 = now();
+  const dur = 160 + Math.min(120, Math.abs(to - from) * 0.15);
+  beginInteraction();
+  const step = () => {
+    const t = Math.min(1, (now() - t0) / dur);
+    const e = 1 - Math.pow(1 - t, 3);
+    flip.dx = from + (to - from) * e;
+    requestRender();
+    if (t < 1) { flip.anim = requestAnimationFrame(step); return; }
+    flip.anim = 0;
+    done?.();
+    endInteractionSoon();
+  };
+  flip.anim = requestAnimationFrame(step);
+}
+/** side: -1 = 左のページへ / +1 = 右のページへ */
+function flipTo(side) {
+  if (!pageMode()) {
+    // 縦スクロール時は「左右」を次/前に読み替えて移動するだけ
+    const i = currentPage() + (side < 0 ? (isRtl() ? 1 : -1) : (isRtl() ? -1 : 1));
+    if (validIndex(i)) showPage(i, cam.z);
+    return;
+  }
+  const target = side < 0 ? leftIndex() : rightIndex();
+  if (!validIndex(target)) { if (flip.dx) animateFlip(0); return; }
+  const dist = PAGE_W * cam.z + FLIP_GAP;
+  animateFlip(side < 0 ? dist : -dist, () => {
+    flip.dx = 0;
+    showPage(target);
+    updateNavUI();
+  });
+}
+function goNext() { flipTo(isRtl() ? -1 : 1); }
+function goPrev() { flipTo(isRtl() ? 1 : -1); }
+const flipping = () => flip.dx !== 0 || flip.anim !== 0;
+
+/* ---- メニューバーの向き ---- */
+function applyLayout() {
+  const mode = settings.barMode || 'auto';
+  const vertical = mode === 'side' || (mode === 'auto' && window.innerWidth > window.innerHeight * 1.1);
+  const ed = $('editor');
+  barVertical = vertical;
+  ed.classList.toggle('vbar', vertical);
+  ed.classList.toggle('side-right', settings.dockSide === 'right');
+  const dock = $('dock');
+  if (vertical) { if (dock.parentElement !== $('topbar')) $('topbar').appendChild(dock); }
+  else if (dock.parentElement !== ed) ed.insertBefore(dock, $('zoomPill'));
+}
+
 function resize() {
+  const wasFit = E ? Math.abs(cam.z / fitPageZoom() - 1) < 0.02 : false;
   const prevCenter = E ? { x: cam.x + viewW / 2 / cam.z, y: cam.y + viewH / 2 / cam.z } : null;
+  applyLayout();
   dpr = Math.min(window.devicePixelRatio || 1, 3);
   viewW = stage.clientWidth || 1;
   viewH = stage.clientHeight || 1;
@@ -154,6 +268,7 @@ function resize() {
     c.style.height = viewH + 'px';
   }
   if (E && prevCenter) {
+    if (wasFit) { showPage(currentPage()); return; }
     cam.x = prevCenter.x - viewW / 2 / cam.z;
     cam.y = prevCenter.y - viewH / 2 / cam.z;
     cam.z = clamp(cam.z, zMin(), zMax());
@@ -173,6 +288,7 @@ function requestRender() {
 }
 
 function visibleRange() {
+  if (pageMode()) { const c = curIndex(); return [c, c]; }
   const y0 = cam.y, y1 = cam.y + viewH / cam.z;
   const i0 = Math.max(0, Math.floor(y0 / PITCH));
   const i1 = Math.min(pageCount() - 1, Math.floor(y1 / PITCH));
@@ -215,6 +331,44 @@ function redrawRegion(c, strokes, b) {
   ctx.restore();
 }
 
+/** ページ i を world座標 (ox, oy) を左上にして描く */
+function drawPage(ctx, i, ox, oy, k) {
+  const id = E.doc.pages[i];
+  const z = cam.z;
+  ctx.save();
+  ctx.shadowColor = 'rgba(0,0,0,0.22)';
+  ctx.shadowBlur = 10 * dpr;
+  ctx.shadowOffsetY = 2 * dpr;
+  ctx.fillStyle = '#fff';
+  ctx.fillRect(ox, oy, PAGE_W, PAGE_H);
+  ctx.restore();
+
+  const ps = pageState(id);
+  if (!ps.strokes) { ensureLoaded(id); return; }
+
+  const want = cacheScaleFor(k);
+  let c = caches.get(id);
+  const valid = c && c.rev === ps.rev;
+  const fits = valid && c.scale >= want - 1e-6 && c.scale <= want * 2 + 1e-6;
+  if (!fits && (!interacting || !valid)) c = buildCache(id, ps, want);
+  c.used = now();
+
+  if (!interacting && k > c.scale * 1.05) {
+    // 等倍を超えて拡大しているときは、見えている範囲の線をベクターのまま直接描く(滲まない)
+    const vx0 = cam.x - ox, vy0 = cam.y - oy;
+    const vx1 = vx0 + viewW / z, vy1 = vy0 + viewH / z;
+    ctx.save();
+    ctx.translate(ox, oy);
+    ctx.beginPath();
+    ctx.rect(0, 0, PAGE_W, PAGE_H);
+    ctx.clip();
+    for (const st of ps.strokes) if (bboxHit(bbox(st), vx0, vy0, vx1, vy1)) drawStroke(ctx, st);
+    ctx.restore();
+  } else {
+    ctx.drawImage(c.canvas, ox, oy, PAGE_W, PAGE_H);
+  }
+}
+
 function render() {
   renderQueued = false;
   if (!E) return;
@@ -228,57 +382,26 @@ function render() {
   ctx.imageSmoothingQuality = 'high';
 
   const [i0, i1] = visibleRange();
-  const want = cacheScaleFor(k);
-  const vx0 = cam.x, vx1 = cam.x + viewW / z;
-  for (let i = i0; i <= i1; i++) {
-    const id = E.doc.pages[i];
-    const top = i * PITCH;
-    ctx.save();
-    ctx.shadowColor = 'rgba(0,0,0,0.22)';
-    ctx.shadowBlur = 10 * dpr;
-    ctx.shadowOffsetY = 2 * dpr;
-    ctx.fillStyle = '#fff';
-    ctx.fillRect(0, top, PAGE_W, PAGE_H);
-    ctx.restore();
-
-    // ページ番号(下の余白)
-    ctx.fillStyle = '#80868c';
-    ctx.font = `${13 / z}px system-ui, sans-serif`;
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
-    ctx.fillText(String(i + 1), PAGE_W / 2, top + PAGE_H + GAP / 2);
-
-    const ps = pageState(id);
-    if (!ps.strokes) { ensureLoaded(id); continue; }
-
-    let c = caches.get(id);
-    const valid = c && c.rev === ps.rev;
-    const fits = valid && c.scale >= want - 1e-6 && c.scale <= want * 2 + 1e-6;
-    if (!fits && (!interacting || !valid)) c = buildCache(id, ps, want);
-    c.used = now();
-
-    if (!interacting && k > c.scale * 1.05) {
-      // 等倍を超えて拡大しているときは、見えている範囲の線をベクターのまま直接描く(滲まない)
-      const vy0 = cam.y - top, vy1 = vy0 + viewH / z;
-      ctx.save();
-      ctx.translate(0, top);
-      ctx.beginPath();
-      ctx.rect(0, 0, PAGE_W, PAGE_H);
-      ctx.clip();
-      for (const st of ps.strokes) if (bboxHit(bbox(st), vx0, vy0, vx1, vy1)) drawStroke(ctx, st);
-      ctx.restore();
-    } else {
-      ctx.drawImage(c.canvas, 0, top, PAGE_W, PAGE_H);
-    }
+  if (pageMode()) {
+    const cur = curIndex(), top = cur * PITCH;
+    const ox = flip.dx / z;
+    drawPage(ctx, cur, ox, top, k);
+    const step = PAGE_W + FLIP_GAP / z;
+    if (flip.dx > 0 && validIndex(leftIndex())) drawPage(ctx, leftIndex(), ox - step, top, k);
+    if (flip.dx < 0 && validIndex(rightIndex())) drawPage(ctx, rightIndex(), ox + step, top, k);
+    // めくりに備えて両隣を先読み
+    for (const j of [cur - 1, cur + 1]) if (validIndex(j)) ensureLoaded(E.doc.pages[j]);
+  } else {
+    for (let i = i0; i <= i1; i++) drawPage(ctx, i, 0, i * PITCH, k);
   }
-  updatePageNo();
+  updateNavUI();
   updateZoomPill();
   housekeep(i0, i1);
 }
 
 /** 見えていないページのキャッシュとストロークを手放す */
 function housekeep(i0, i1) {
-  const visible = new Set(E.doc.pages.slice(i0, i1 + 1));
+  const visible = new Set(E.doc.pages.slice(Math.max(0, i0 - 1), i1 + 2));
   let total = 0;
   for (const c of caches.values()) total += c.canvas.width * c.canvas.height;
   if (total > CACHE_BUDGET) {
@@ -306,10 +429,18 @@ function housekeep(i0, i1) {
   }
 }
 
-let shownPageNo = '';
-function updatePageNo() {
-  const s = `${currentPage() + 1} / ${pageCount()}`;
-  if (s !== shownPageNo) { $('pageNo').textContent = s; shownPageNo = s; }
+let shownNav = '';
+function updateNavUI() {
+  const cur = currentPage(), n = pageCount();
+  const leftI = cur + (isRtl() ? 1 : -1), rightI = cur + (isRtl() ? -1 : 1);
+  const s = `${cur}/${n}/${isRtl()}`;
+  if (s === shownNav) return;
+  shownNav = s;
+  $('pageNo').textContent = `${cur + 1} / ${n}`;
+  $('prevBtn').disabled = !validIndex(leftI);
+  $('nextBtn').disabled = !validIndex(rightI);
+  $('prevBtn').title = isRtl() ? '次のページ（←）' : '前のページ（←）';
+  $('nextBtn').title = isRtl() ? '前のページ（→）' : '次のページ（→）';
 }
 let shownZoom = '';
 function updateZoomPill() {
@@ -401,7 +532,7 @@ function redo() {
 function revealPage(pageId) {
   const i = E.doc.pages.indexOf(pageId);
   const [i0, i1] = visibleRange();
-  if (i >= 0 && (i < i0 || i > i1)) { showPage(i, cam.z); return true; }
+  if (i >= 0 && (i < i0 || i > i1)) { showPage(i, pageMode() ? undefined : cam.z); return true; }
   return false;
 }
 function updateUndoUI() {
@@ -489,10 +620,13 @@ const penIndex = () => Number(settings.tool.replace('pen', '')) || 0;
 function toWorld(e) {
   return [cam.x + e.clientX / cam.z, cam.y + e.clientY / cam.z];
 }
+let recentMaxPressure = 0; // 設定画面に「直近の最大筆圧」として出す
 function pressureOf(e) {
   if (e.pointerType !== 'pen') return 0.5;
-  const p = e.pressure > 0 ? e.pressure : 0.02;
-  return Math.pow(clamp(p, 0, 1), settings.gamma);
+  const raw = e.pressure > 0 ? e.pressure : 0.02;
+  if (e.buttons && raw > recentMaxPressure) recentMaxPressure = raw;
+  // 端末によって最大まで押しても1.0に届かない(MovinkPad+Firefoxで0.55程度)ので、上限で正規化する
+  return Math.pow(clamp(raw / settings.pmax, 0, 1), settings.gamma);
 }
 function wantsEraser(e) {
   if (e.pointerType === 'pen') {
@@ -680,9 +814,21 @@ function touchMove(e) {
   const cur = touchInfo();
   const ref = gest.ref;
   if (ref && ref.n === cur.n) {
+    const dx = cur.cx - ref.cx, dy = cur.cy - ref.cy;
     if (cur.n >= 2 && ref.d > 0 && cur.d > 0) zoomAt(cur.cx, cur.cy, cur.d / ref.d);
-    cam.x -= (cur.cx - ref.cx) / cam.z;
-    cam.y -= (cur.cy - ref.cy) / cam.z;
+    const a = area();
+    const fitsX = PAGE_W * cam.z <= a.x1 - a.x0 + 1;
+    if (pageMode() && cur.n === 1 && !flip.anim && (fitsX || flip.dx !== 0)) {
+      // ページ送り: 横の動きはページをめくる方へ。隣が無い方向はゴムのように少しだけ動く
+      const nd = flip.dx + dx;
+      const hasNeighbor = nd > 0 ? validIndex(leftIndex()) : validIndex(rightIndex());
+      flip.dx = hasNeighbor ? nd : flip.dx + dx * 0.3;
+      cam.y -= dy / cam.z;
+    } else {
+      if (flip.dx && !flip.anim) animateFlip(0);
+      cam.x -= dx / cam.z;
+      cam.y -= dy / cam.z;
+    }
     clampCam();
     if (cur.n === 1) {
       gest.vel.push({ t: now(), x: cur.cx, y: cur.cy });
@@ -698,9 +844,22 @@ function touchUp(e) {
   const g = gest;
   gest = null;
   const quick = now() - g.t0 < 350;
+  let vx = 0;
+  if (g.vel.length >= 2) {
+    const a = g.vel[0], b = g.vel[g.vel.length - 1];
+    if (b.t > a.t && now() - b.t < 80) vx = (b.x - a.x) / (b.t - a.t);
+  }
   if (!g.moved && quick && settings.tapUndo && e.type === 'pointerup') {
+    if (flip.dx && !flip.anim) animateFlip(0);
     if (g.max === 2) undo();
     else if (g.max >= 3) redo();
+  } else if (flip.dx !== 0 && !flip.anim) {
+    // 指を離した: 一定以上ずらしたか、はじいたらめくる。足りなければ戻す
+    const th = Math.min(viewW * 0.18, 160);
+    if (flip.dx > 0 && (flip.dx > th || vx > 0.45) && validIndex(leftIndex())) flipTo(-1);
+    else if (flip.dx < 0 && (flip.dx < -th || vx < -0.45) && validIndex(rightIndex())) flipTo(1);
+    else animateFlip(0);
+    return;
   } else if (g.max === 1 && g.vel.length >= 2) {
     const a = g.vel[0], b = g.vel[g.vel.length - 1];
     const dt = b.t - a.t;
@@ -776,7 +935,7 @@ stage.addEventListener('pointerdown', (e) => {
     e.preventDefault();
     return;
   }
-  if (drawing || erasing) return;
+  if (drawing || erasing || flipping()) return;
   if (e.pointerType === 'mouse' && e.button !== 0) return;
   capture(e.pointerId);
   startTool(e);
@@ -828,13 +987,24 @@ stage.addEventListener('pointerleave', (e) => {
 });
 stage.addEventListener('contextmenu', (e) => e.preventDefault());
 
+let wheelAcc = 0, wheelFlipAt = 0;
 stage.addEventListener('wheel', (e) => {
   if (!E) return;
   e.preventDefault();
   const unit = e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? viewH : 1;
   beginInteraction();
+  const a = area();
+  const fits = PAGE_W * cam.z <= a.x1 - a.x0 + 1 && PAGE_H * cam.z <= a.y1 - a.y0 + 1;
   if (e.ctrlKey || e.metaKey) {
     zoomAt(e.clientX, e.clientY, Math.exp(-e.deltaY * unit * 0.0015));
+  } else if (pageMode() && fits) {
+    // ページ全体が見えているときのホイールはページ送り
+    wheelAcc += e.deltaY * unit;
+    if (Math.abs(wheelAcc) > 80 && now() - wheelFlipAt > 350 && !flip.anim) {
+      wheelAcc > 0 ? goNext() : goPrev();
+      wheelFlipAt = now();
+      wheelAcc = 0;
+    }
   } else {
     cam.x += (e.deltaX * unit) / cam.z;
     cam.y += (e.deltaY * unit) / cam.z;
@@ -857,8 +1027,10 @@ window.addEventListener('keydown', (e) => {
   if (k === 'e') selectTool('eraser');
   else if (k === '1' || k === '2' || k === '3') selectTool('pen' + (Number(k) - 1));
   else if (k === 'b' || k === 'p') selectTool('pen' + penIndex());
-  else if (e.key === 'PageDown') showPage(Math.min(pageCount() - 1, currentPage() + 1), cam.z);
-  else if (e.key === 'PageUp') showPage(Math.max(0, currentPage() - 1), cam.z);
+  else if (e.key === 'PageDown') goNext();
+  else if (e.key === 'PageUp') goPrev();
+  else if (e.key === 'ArrowLeft') flipTo(-1);
+  else if (e.key === 'ArrowRight') flipTo(1);
 });
 
 /* ============================================================
@@ -909,7 +1081,7 @@ $('eraserBtn').addEventListener('click', () => {
 $('addPageBtn').addEventListener('click', () => {
   const i = currentPage();
   insertPage(i + 1);
-  showPage(i + 1, cam.z);
+  if (pageMode()) goNext(); else showPage(i + 1, cam.z);
   toast(`${i + 2}ページ目を追加した`);
 });
 
@@ -1095,6 +1267,8 @@ $('pgDel').addEventListener('click', async () => {
   afterPageOp();
 });
 $('pageBtn').addEventListener('click', openPagesDialog);
+$('prevBtn').addEventListener('click', () => flipTo(-1));
+$('nextBtn').addEventListener('click', () => flipTo(1));
 $('pagesDlg').addEventListener('close', revokeThumbs);
 
 /* ============================================================
@@ -1200,6 +1374,12 @@ async function openSettings() {
   $('fingerDraw').checked = settings.fingerDraw;
   $('tapUndo').checked = settings.tapUndo;
   for (const r of document.querySelectorAll('input[name=dockSide]')) r.checked = r.value === settings.dockSide;
+  for (const n of ['viewMode', 'readDir', 'barMode']) {
+    for (const r of document.querySelectorAll(`input[name=${n}]`)) r.checked = r.value === settings[n];
+  }
+  $('pmax').value = settings.pmax;
+  $('pmaxOut').textContent = settings.pmax.toFixed(2);
+  $('pmaxSeen').textContent = recentMaxPressure ? `直近の最大筆圧: ${recentMaxPressure.toFixed(2)}` : '（ペンで描くと直近の最大筆圧が出る）';
   $('settingsDlg').showModal();
   const info = $('persistInfo');
   info.textContent = '';
@@ -1216,8 +1396,30 @@ $('sideEraser').addEventListener('change', (e) => { settings.sideEraser = e.targ
 $('fingerDraw').addEventListener('change', (e) => { settings.fingerDraw = e.target.checked; saveSettings(); });
 $('tapUndo').addEventListener('change', (e) => { settings.tapUndo = e.target.checked; saveSettings(); });
 for (const r of document.querySelectorAll('input[name=dockSide]')) {
-  r.addEventListener('change', () => { settings.dockSide = r.value; saveSettings(); renderDock(); });
+  r.addEventListener('change', () => { settings.dockSide = r.value; saveSettings(); renderDock(); relayout(); });
 }
+/** レイアウトに関わる設定を変えたら、今のページを全体表示し直す */
+function relayout() {
+  const i = E ? currentPage() : 0;
+  resize();
+  if (E) { flip.dx = 0; shownNav = ''; showPage(i); }
+}
+for (const n of ['viewMode', 'readDir', 'barMode']) {
+  for (const r of document.querySelectorAll(`input[name=${n}]`)) {
+    r.addEventListener('change', () => {
+      const i = E ? currentPage() : 0;
+      settings[n] = r.value;
+      saveSettings();
+      if (E && n === 'viewMode') setCur(i);
+      relayout();
+    });
+  }
+}
+$('pmax').addEventListener('input', (e) => {
+  settings.pmax = Number(e.target.value);
+  $('pmaxOut').textContent = settings.pmax.toFixed(2);
+  saveSettings();
+});
 $('settingsBtn').addEventListener('click', openSettings);
 $('listSettingsBtn').addEventListener('click', openSettings);
 
@@ -1369,7 +1571,10 @@ async function openDoc(id) {
   $('listScreen').hidden = true;
   $('editor').hidden = false;
   $('docTitle').textContent = doc.title;
-  shownPageNo = '';
+  shownNav = '';
+  E.curIdx = clamp(doc.lastPage || 0, 0, doc.pages.length - 1);
+  E.curId = doc.pages[E.curIdx];
+  flip.dx = 0;
   shownZoom = '';
   resize();
   renderDock();
@@ -1417,6 +1622,7 @@ document.addEventListener('visibilitychange', () => {
 });
 window.addEventListener('pagehide', () => { if (E) flushSave(); });
 new ResizeObserver(() => resize()).observe(stage);
+window.addEventListener('resize', () => resize());
 
 /* ---- 起動 ---- */
 renderDock();
