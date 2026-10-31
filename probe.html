@@ -50,7 +50,8 @@
 const pad = document.getElementById('pad');
 const base = document.getElementById('base'), fast = document.getElementById('fast');
 const bctx = base.getContext('2d');
-const fctx = fast.getContext('2d', { desynchronized: true });
+// 透明キャンバスに desynchronized を付けるとAndroid Chromeで真っ黒になるので付けない(対応可否は env() で別に調べる)
+const fctx = fast.getContext('2d');
 let dpr = 1;
 function size() {
   dpr = window.devicePixelRatio || 1;

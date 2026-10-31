@@ -3,7 +3,7 @@
    - ページは 2508×3541(B5・350dpi相当)固定。縦に並べてスクロールする
    - 線はベクター(点列)で持ち、表示用には「ページごとの画像キャッシュ」を
      その時の倍率で焼いて使う(全ページをフル解像度で持つとメモリが持たない)
-   - 描画中の線だけは低遅延の重ねキャンバス(#live, desynchronized)に描き、
+   - 描画中の線だけは重ねキャンバス(#live)に描き、
      ペンを離したらページのキャッシュへ焼き込む
    ============================================================ */
 import * as db from './db.js';
@@ -46,6 +46,7 @@ const DEFAULTS = {
   readDir: 'rtl',     // rtl=右開き(漫画・次のページは左) / ltr=左開き
   barMode: 'auto',    // auto=横長画面なら縦バー / top / side
   pmax: 0.7,          // この筆圧で最大の太さになる
+  lowLatency: false,  // 低遅延描画(実験的)
 };
 const settings = (() => {
   let s = {};
@@ -62,7 +63,32 @@ const COLORS = ['#1f2328', '#5b6168', '#9aa0a6', '#3b78d8', '#6fb3ec', '#d64545'
 const stage = $('stage');
 const viewCv = $('view'), liveCv = $('live');
 const viewCtx = viewCv.getContext('2d', { alpha: false });
-const liveCtx = liveCv.getContext('2d', { desynchronized: true });
+// 透明な重ねキャンバスに desynchronized を付けると、Android Chromeでは透明部分が
+// 真っ黒に表示される。重ねキャンバスは普通のキャンバスにし、低遅延は下の inkCv(不透明)で別に扱う
+const liveCtx = liveCv.getContext('2d');
+
+/* 低遅延描画(実験的・設定でオン): 不透明な desynchronized キャンバスを描画中だけ表示し、
+   毎フレーム「表示中の画面(view)を写す → 描きかけの線を重ねる」。不透明なので黒くならない */
+let inkCv = null, inkCtx = null;
+function ensureInk() {
+  if (inkCv) return;
+  inkCv = document.createElement('canvas');
+  inkCv.id = 'ink';
+  inkCv.style.visibility = 'hidden';
+  inkCv.style.pointerEvents = 'none';
+  stage.insertBefore(inkCv, liveCv);
+  inkCtx = inkCv.getContext('2d', { desynchronized: true, alpha: false });
+  sizeCanvas(inkCv);
+}
+function hideInk() {
+  if (inkCv && inkCv.style.visibility !== 'hidden') inkCv.style.visibility = 'hidden';
+}
+function sizeCanvas(c) {
+  c.width = Math.round(viewW * dpr);
+  c.height = Math.round(viewH * dpr);
+  c.style.width = viewW + 'px';
+  c.style.height = viewH + 'px';
+}
 
 /* ---------------- 編集中の状態 ---------------- */
 let E = null; // { doc, pages:Map, undo:[], redo:[], dirty:Set, docDirty, saveTimer, saving }
@@ -261,12 +287,7 @@ function resize() {
   dpr = Math.min(window.devicePixelRatio || 1, 3);
   viewW = stage.clientWidth || 1;
   viewH = stage.clientHeight || 1;
-  for (const c of [viewCv, liveCv]) {
-    c.width = Math.round(viewW * dpr);
-    c.height = Math.round(viewH * dpr);
-    c.style.width = viewW + 'px';
-    c.style.height = viewH + 'px';
-  }
+  for (const c of [viewCv, liveCv, inkCv]) if (c) sizeCanvas(c);
   if (E && prevCenter) {
     if (wasFit) { showPage(currentPage()); return; }
     cam.x = prevCenter.x - viewW / 2 / cam.z;
@@ -397,6 +418,7 @@ function render() {
   updateNavUI();
   updateZoomPill();
   housekeep(i0, i1);
+  if (!drawing) hideInk();
 }
 
 /** 見えていないページのキャッシュとストロークを手放す */
@@ -463,15 +485,23 @@ function drawLive() {
   ctx.clearRect(0, 0, liveCv.width, liveCv.height);
   const k = cam.z * dpr;
   if (drawing && drawing.pts.length) {
-    ctx.setTransform(k, 0, 0, k, -cam.x * k, (drawing.top - cam.y) * k);
-    ctx.save();
-    ctx.beginPath();
-    ctx.rect(0, 0, PAGE_W, PAGE_H);
-    ctx.clip();
+    let tctx = ctx;
+    if (settings.lowLatency) {
+      ensureInk();
+      tctx = inkCtx;
+      tctx.setTransform(1, 0, 0, 1, 0, 0);
+      tctx.drawImage(viewCv, 0, 0);
+    }
+    tctx.setTransform(k, 0, 0, k, -cam.x * k, (drawing.top - cam.y) * k);
+    tctx.save();
+    tctx.beginPath();
+    tctx.rect(0, 0, PAGE_W, PAGE_H);
+    tctx.clip();
     const pts = drawing.pred.length ? drawing.pts.concat(drawing.pred) : drawing.pts;
-    ctx.fillStyle = drawing.st.c;
-    ctx.fill(livePath(drawing.st, pts, false));
-    ctx.restore();
+    tctx.fillStyle = drawing.st.c;
+    tctx.fill(livePath(drawing.st, pts, false));
+    tctx.restore();
+    if (settings.lowLatency) inkCv.style.visibility = 'visible';
   }
   if (cursor && (erasing || isEraserTool())) {
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
@@ -723,6 +753,7 @@ function endStroke(e) {
 }
 function cancelStroke() {
   drawing = null;
+  hideInk();
   requestLive();
 }
 
@@ -1373,6 +1404,7 @@ async function openSettings() {
   $('sideEraser').checked = settings.sideEraser;
   $('fingerDraw').checked = settings.fingerDraw;
   $('tapUndo').checked = settings.tapUndo;
+  $('lowLatency').checked = settings.lowLatency;
   for (const r of document.querySelectorAll('input[name=dockSide]')) r.checked = r.value === settings.dockSide;
   for (const n of ['viewMode', 'readDir', 'barMode']) {
     for (const r of document.querySelectorAll(`input[name=${n}]`)) r.checked = r.value === settings[n];
@@ -1395,6 +1427,7 @@ $('gamma').addEventListener('input', (e) => { settings.gamma = Number(e.target.v
 $('sideEraser').addEventListener('change', (e) => { settings.sideEraser = e.target.checked; saveSettings(); });
 $('fingerDraw').addEventListener('change', (e) => { settings.fingerDraw = e.target.checked; saveSettings(); });
 $('tapUndo').addEventListener('change', (e) => { settings.tapUndo = e.target.checked; saveSettings(); });
+$('lowLatency').addEventListener('change', (e) => { settings.lowLatency = e.target.checked; saveSettings(); hideInk(); });
 for (const r of document.querySelectorAll('input[name=dockSide]')) {
   r.addEventListener('change', () => { settings.dockSide = r.value; saveSettings(); renderDock(); relayout(); });
 }
