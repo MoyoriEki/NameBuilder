@@ -6,10 +6,10 @@
    - 描画中の線だけは重ねキャンバス(#live)に描き、
      ペンを離したらページのキャッシュへ焼き込む
    ============================================================ */
-import * as db from './db.js?v=16';
-import { drawStroke, drawLiveStroke, isOpacityStroke, opacityAt, bbox, bboxHit, hitStroke, eraseSplit, sweep } from './ink.js?v=16';
-import { pngWithDpi, makeZip } from './zip.js?v=16';
-import * as cloud from './cloud.js?v=16';
+import * as db from './db.js?v=17';
+import { drawStroke, drawLiveStroke, isOpacityStroke, opacityAt, bbox, bboxHit, hitStroke, eraseSplit, sweep } from './ink.js?v=17';
+import { pngWithDpi, makeZip } from './zip.js?v=17';
+import * as cloud from './cloud.js?v=17';
 
 const PAGE_W = 2508, PAGE_H = 3541, DPI = 350;
 const GAP = 140;                 // ページ間の隙間(page-px)
@@ -48,7 +48,7 @@ const DEFAULTS = {
   barMode: 'auto',    // auto=横長画面なら縦バー / top / side
   pmax: 0.7,          // この筆圧で最大の太さになる
   lowLatency: false,  // 低遅延描画(実験的)
-  fullscreen: true,   // 全画面(Androidの上のステータスバーと下のナビゲーションバーを隠す)
+  fullscreen: true,   // 作品を開いている間は全画面(Androidの上のステータスバーと下のナビゲーションバーを隠す)
 };
 const settings = (() => {
   let s = {};
@@ -229,6 +229,18 @@ const isRtl = () => settings.readDir !== 'ltr';
 const leftIndex = () => curIndex() + (isRtl() ? 1 : -1);
 const rightIndex = () => curIndex() + (isRtl() ? -1 : 1);
 const validIndex = (i) => i >= 0 && i < pageCount();
+/** side(-1=左/+1=右)へめくれるか。最後のページの「次」側は、新しいページを足してめくれる */
+const sideIndex = (side) => (side < 0 ? leftIndex() : rightIndex());
+const isNewPageSide = (side) => sideIndex(side) === pageCount();
+const canFlipSide = (side) => validIndex(sideIndex(side)) || isNewPageSide(side);
+/** めくり確定。最後のページの先なら白紙のページを足してからめくる */
+function flipCommit(side) {
+  if (isNewPageSide(side)) {
+    insertPage(pageCount());
+    toast(`${pageCount()}ページ目を追加した`);
+  }
+  flipTo(side);
+}
 
 /** めくりアニメーション: flip.dx を to まで動かし、終わったら done() */
 function animateFlip(to, done) {
@@ -392,6 +404,25 @@ function drawPage(ctx, i, ox, oy, k) {
   }
 }
 
+/** 最後のページの先に見せる「＋ 新しいページ」(まだ存在しない) */
+function drawNewPageGhost(ctx, ox, oy) {
+  const z = cam.z;
+  ctx.save();
+  ctx.fillStyle = 'rgba(255,255,255,0.55)';
+  ctx.fillRect(ox, oy, PAGE_W, PAGE_H);
+  ctx.setLineDash([12 / z, 8 / z]);
+  ctx.lineWidth = 2 / z;
+  ctx.strokeStyle = '#8a9096';
+  ctx.strokeRect(ox, oy, PAGE_W, PAGE_H);
+  ctx.setLineDash([]);
+  ctx.fillStyle = '#6b7278';
+  ctx.font = `${22 / z}px system-ui, sans-serif`;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText('＋ 新しいページ', ox + PAGE_W / 2, oy + PAGE_H / 2);
+  ctx.restore();
+}
+
 function render() {
   renderQueued = false;
   if (!E) return;
@@ -410,8 +441,14 @@ function render() {
     const ox = flip.dx / z;
     drawPage(ctx, cur, ox, top, k);
     const step = PAGE_W + FLIP_GAP / z;
-    if (flip.dx > 0 && validIndex(leftIndex())) drawPage(ctx, leftIndex(), ox - step, top, k);
-    if (flip.dx < 0 && validIndex(rightIndex())) drawPage(ctx, rightIndex(), ox + step, top, k);
+    if (flip.dx > 0) {
+      if (validIndex(leftIndex())) drawPage(ctx, leftIndex(), ox - step, top, k);
+      else if (isNewPageSide(-1)) drawNewPageGhost(ctx, ox - step, top);
+    }
+    if (flip.dx < 0) {
+      if (validIndex(rightIndex())) drawPage(ctx, rightIndex(), ox + step, top, k);
+      else if (isNewPageSide(1)) drawNewPageGhost(ctx, ox + step, top);
+    }
     // めくりに備えて両隣を先読み
     for (const j of [cur - 1, cur + 1]) if (validIndex(j)) ensureLoaded(E.doc.pages[j]);
   } else {
@@ -893,7 +930,7 @@ function touchMove(e) {
     if (pageMode() && cur.n === 1 && !flip.anim && (fitsX || flip.dx !== 0)) {
       // ページ送り: 横の動きはページをめくる方へ。隣が無い方向はゴムのように少しだけ動く
       const nd = flip.dx + dx;
-      const hasNeighbor = nd > 0 ? validIndex(leftIndex()) : validIndex(rightIndex());
+      const hasNeighbor = canFlipSide(nd > 0 ? -1 : 1);
       flip.dx = hasNeighbor ? nd : flip.dx + dx * 0.3;
       cam.y -= dy / cam.z;
     } else {
@@ -928,8 +965,8 @@ function touchUp(e) {
   } else if (flip.dx !== 0 && !flip.anim) {
     // 指を離した: 一定以上ずらしたか、はじいたらめくる。足りなければ戻す
     const th = Math.min(viewW * 0.18, 160);
-    if (flip.dx > 0 && (flip.dx > th || vx > 0.45) && validIndex(leftIndex())) flipTo(-1);
-    else if (flip.dx < 0 && (flip.dx < -th || vx < -0.45) && validIndex(rightIndex())) flipTo(1);
+    if (flip.dx > 0 && (flip.dx > th || vx > 0.45) && canFlipSide(-1)) flipCommit(-1);
+    else if (flip.dx < 0 && (flip.dx < -th || vx < -0.45) && canFlipSide(1)) flipCommit(1);
     else animateFlip(0);
     return;
   } else if (g.max === 1 && g.vel.length >= 2) {
@@ -1673,23 +1710,26 @@ $('fullscreen').addEventListener('change', (e) => {
   settings.fullscreen = e.target.checked;
   saveSettings();
   if (settings.fullscreen) enterFullscreen();
-  else if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
+  else exitFullscreen();
 });
 
-/* ---- 全画面 ----
-   ブラウザの決まりで、全画面への切り替えはタップなどの操作をきっかけにしかできない。
-   設定がオンなら、指やペンを離したタイミングで切り替える(描いている途中に画面の大きさが
-   変わらないよう、押した瞬間ではなく離した瞬間)。manifest も display: fullscreen にしてあるので、
-   ホーム画面から起動したアプリは最初から全画面になる(その場合はここでは何もしない) */
+/* ---- 全画面(作品を開いている間だけ) ----
+   Webアプリからは上下のバーを「両方隠す/両方出す」しか選べないので、描くときだけ全画面にし、
+   作品一覧では時計などのバーを出す。全画面への切り替えはタップなどの操作をきっかけにしかできない
+   (ブラウザの決まり)ので、作品を開くタップのときに切り替え、解除されていたら(Androidの戻る操作等)
+   次に指やペンを離したタイミングで戻す(押した瞬間だと描いている途中に画面の大きさが変わる) */
 const fullscreenCapable = () => !!document.documentElement.requestFullscreen;
 const inFullscreen = () => !!document.fullscreenElement || matchMedia('(display-mode: fullscreen)').matches;
 let fsPending = false;
 function enterFullscreen() {
-  if (!settings.fullscreen || !fullscreenCapable() || inFullscreen() || fsPending) return;
+  if (!E || !settings.fullscreen || !fullscreenCapable() || inFullscreen() || fsPending) return;
   fsPending = true;
   const done = () => { fsPending = false; };
   document.documentElement.requestFullscreen({ navigationUI: 'hide' }).then(done, done);
   setTimeout(done, 2000); // 返事が来ないまま固まった場合の保険
+}
+function exitFullscreen() {
+  if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
 }
 // 描画の後始末(stage の pointerup)が済んだ後に動くよう、バブリング段階で受ける
 document.addEventListener('pointerup', () => {
@@ -1911,6 +1951,7 @@ async function openDoc(id) {
   const doc = await db.getDoc(id);
   if (!doc) { toast('作品が見つからない'); return; }
   E = newEditorState(doc);
+  enterFullscreen(); // 作品を開いたタップをきっかけに全画面へ
   caches.clear();
   $('listScreen').hidden = true;
   $('editor').hidden = false;
@@ -1936,8 +1977,10 @@ async function closeDoc() {
   discardEditor();
   cloud.syncNow();
 }
-/** 編集画面を保存せずに閉じる(Dropboxの版に差し替わったとき用。closeDoc からも使う) */
-function discardEditor() {
+/** 編集画面を保存せずに閉じる(Dropboxの版に差し替わったとき用。closeDoc からも使う)。
+ *  reopening = すぐ開き直すので全画面は解除しない */
+function discardEditor(reopening = false) {
+  if (!reopening) exitFullscreen();
   for (const c of caches.values()) c.canvas.width = c.canvas.height = 0;
   caches.clear();
   E = null;
@@ -1990,7 +2033,7 @@ cloud.initCloud({
   replacedOpen: (docId) => {
     if (!E || E.doc.id !== docId) return;
     const page = currentPage();
-    discardEditor();
+    discardEditor(true);
     openDoc(docId).then(() => { if (E) { showPage(page); toast('ほかの端末の変更を取り込んだ'); } });
   },
   makeThumb: (strokes) => makeThumb(null, { strokes }),
