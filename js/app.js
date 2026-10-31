@@ -6,10 +6,10 @@
    - 描画中の線だけは重ねキャンバス(#live)に描き、
      ペンを離したらページのキャッシュへ焼き込む
    ============================================================ */
-import * as db from './db.js?v=15';
-import { drawStroke, drawLiveStroke, isOpacityStroke, opacityAt, bbox, bboxHit, hitStroke, eraseSplit, sweep } from './ink.js?v=15';
-import { pngWithDpi, makeZip } from './zip.js?v=15';
-import * as cloud from './cloud.js?v=15';
+import * as db from './db.js?v=16';
+import { drawStroke, drawLiveStroke, isOpacityStroke, opacityAt, bbox, bboxHit, hitStroke, eraseSplit, sweep } from './ink.js?v=16';
+import { pngWithDpi, makeZip } from './zip.js?v=16';
+import * as cloud from './cloud.js?v=16';
 
 const PAGE_W = 2508, PAGE_H = 3541, DPI = 350;
 const GAP = 140;                 // ページ間の隙間(page-px)
@@ -1338,98 +1338,177 @@ function insertPage(index, strokes = []) {
   requestRender();
   return id;
 }
-let pgSel = 0;
 const thumbUrls = [];
 function revokeThumbs() { while (thumbUrls.length) URL.revokeObjectURL(thumbUrls.pop()); }
 
+/* ---- ページ一覧 ----
+   タップでそのページへ移動。各ページの「⋯」から追加・複製・移動・削除。
+   「選択」にすると複数ページを選んでまとめて削除できる */
+let pgSelectMode = false;
+const pgSelected = new Set(); // ページID
+
 async function openPagesDialog() {
   await flushSave();
-  pgSel = currentPage();
+  pgSelectMode = false;
+  pgSelected.clear();
   await renderPageGrid();
   $('pagesDlg').showModal();
-  $('pageGrid').children[pgSel]?.scrollIntoView({ block: 'center' });
+  $('pageGrid').children[currentPage()]?.scrollIntoView({ block: 'center' });
 }
 async function renderPageGrid() {
   revokeThumbs();
   const grid = $('pageGrid');
   grid.innerHTML = '';
+  grid.classList.toggle('selecting', pgSelectMode);
   const doc = E.doc;
+  const cur = currentPage();
   doc.pages.forEach((id, i) => {
     const el = document.createElement('div');
-    el.className = 'pg' + (i === pgSel ? ' sel' : '');
+    el.className = 'pg' + (i === cur ? ' cur' : '') + (pgSelected.has(id) ? ' checked' : '');
     const th = document.createElement('div');
     th.className = 'pg-thumb';
     const img = document.createElement('img');
     img.alt = '';
     th.appendChild(img);
+    const check = document.createElement('span');
+    check.className = 'pg-check';
+    th.appendChild(check);
     db.getThumb(doc.id, id).then((b) => {
       if (!b) return;
       const u = URL.createObjectURL(b);
       thumbUrls.push(u);
       img.src = u;
     });
-    el.append(th, document.createTextNode(String(i + 1)));
+    const row = document.createElement('div');
+    row.className = 'pg-row';
+    const num = document.createElement('span');
+    num.className = 'pg-num';
+    num.textContent = i === cur ? `${i + 1}（表示中）` : String(i + 1);
+    const more = document.createElement('button');
+    more.type = 'button';
+    more.className = 'pg-more';
+    more.textContent = '⋯';
+    more.title = 'このページの操作';
+    more.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const r = more.getBoundingClientRect();
+      showPageMenu(i, r.right, r.bottom);
+    });
+    row.append(num, more);
+    el.append(th, row);
     el.addEventListener('click', () => {
-      if (pgSel === i) { $('pagesDlg').close(); showPage(i); return; }
-      pgSel = i;
-      for (const [j, c] of [...grid.children].entries()) c.classList.toggle('sel', j === i);
-      updatePgInfo();
+      if (pgSelectMode) {
+        if (pgSelected.has(id)) pgSelected.delete(id); else pgSelected.add(id);
+        el.classList.toggle('checked', pgSelected.has(id));
+        updatePgFoot();
+        return;
+      }
+      $('pagesDlg').close();
+      showPage(i);
     });
     grid.appendChild(el);
   });
-  updatePgInfo();
+  updatePgFoot();
 }
-function updatePgInfo() {
-  $('pageSelInfo').textContent = `${pgSel + 1}ページ目を選択中（もう一度タップで移動）`;
-  $('pgMoveL').disabled = pgSel === 0;
-  $('pgMoveR').disabled = pgSel >= pageCount() - 1;
-  $('pgDel').disabled = pageCount() <= 1;
+function updatePgFoot() {
+  const n = pageCount();
+  $('pgSelectBtn').textContent = pgSelectMode ? '選択をやめる' : '選択';
+  $('pgSelAll').hidden = !pgSelectMode;
+  $('pgDelSel').hidden = !pgSelectMode;
+  $('pgAddEnd').hidden = pgSelectMode;
+  $('pgDelSel').disabled = pgSelected.size === 0;
+  $('pgDelSel').textContent = pgSelected.size ? `削除（${pgSelected.size}ページ）` : '削除';
+  $('pageSelInfo').textContent = pgSelectMode
+    ? `${pgSelected.size}ページ選択中`
+    : `全${n}ページ・タップで移動／⋯で操作`;
+}
+function showPageMenu(i, x, y) {
+  const n = pageCount();
+  const items = [
+    { label: 'このページを開く', fn: () => { $('pagesDlg').close(); showPage(i); } },
+    { label: '前に白紙ページを追加', fn: () => { insertPage(i); afterPageOp(); } },
+    { label: '後ろに白紙ページを追加', fn: () => { insertPage(i + 1); afterPageOp(); } },
+    { label: '複製（すぐ後ろに）', fn: () => duplicatePage(i) },
+  ];
+  if (i > 0) items.push({ label: '前へ移動', fn: () => movePage(i, -1) });
+  if (i < n - 1) items.push({ label: '後ろへ移動', fn: () => movePage(i, 1) });
+  items.push({ label: '削除', danger: true, fn: () => deletePagesAsk([E.doc.pages[i]]) });
+  showMenu(x, y, items);
 }
 async function afterPageOp() {
   markDocDirty();
   await flushSave();
-  await renderPageGrid();
-  $('pageGrid').children[pgSel]?.scrollIntoView({ block: 'nearest' });
+  if ($('pagesDlg').open) await renderPageGrid();
   clampCam();
+  shownNav = '';
   requestRender();
 }
-function movePage(delta) {
-  const p = E.doc.pages, j = pgSel + delta;
+function movePage(i, delta) {
+  const p = E.doc.pages, j = i + delta;
   if (j < 0 || j >= p.length) return;
-  [p[pgSel], p[j]] = [p[j], p[pgSel]];
-  pgSel = j;
+  [p[i], p[j]] = [p[j], p[i]];
   afterPageOp();
 }
-$('pgMoveL').addEventListener('click', () => movePage(-1));
-$('pgMoveR').addEventListener('click', () => movePage(1));
-$('pgInsBefore').addEventListener('click', () => { insertPage(pgSel); afterPageOp(); });
-$('pgInsAfter').addEventListener('click', () => { insertPage(pgSel + 1); pgSel++; afterPageOp(); });
-$('pgDup').addEventListener('click', async () => {
-  const src = E.doc.pages[pgSel];
+async function duplicatePage(i) {
+  const src = E.doc.pages[i];
   const ps = pageState(src);
   let strokes = ps.strokes;
   if (!strokes) strokes = (await db.getPage(E.doc.id, src))?.strokes || [];
-  insertPage(pgSel + 1, strokes.slice());
-  pgSel++;
+  insertPage(i + 1, strokes.slice());
   afterPageOp();
-});
-$('pgDel').addEventListener('click', async () => {
-  if (pageCount() <= 1) return;
-  if (!confirm(`${pgSel + 1}ページ目を削除する？（元に戻せない）`)) return;
-  const [id] = E.doc.pages.splice(pgSel, 1);
-  E.pages.delete(id);
-  E.dirty.delete(id);
-  const c = caches.get(id);
-  if (c) { c.canvas.width = c.canvas.height = 0; caches.delete(id); }
-  // このページに関する履歴は捨てる
-  const strip = (list) => list.map((ent) => ent.filter((e) => e.pageId !== id)).filter((ent) => ent.length);
+}
+/** ページを削除(確認つき)。全部は消せない(1ページは残す) */
+async function deletePagesAsk(ids) {
+  if (!ids.length) return false;
+  if (ids.length >= pageCount()) {
+    await askConfirm('すべてのページは削除できない（作品には1ページ以上必要）。', 'OK', false, true);
+    return false;
+  }
+  const nums = ids.map((id) => E.doc.pages.indexOf(id) + 1).sort((a, b) => a - b);
+  const what = ids.length === 1 ? `${nums[0]}ページ目` : `${ids.length}ページ（${nums.join('・')}）`;
+  if (!(await askConfirm(`${what}を削除する？\n元に戻せない。`, '削除', true))) return false;
+  for (const id of ids) {
+    const k = E.doc.pages.indexOf(id);
+    if (k < 0) continue;
+    E.doc.pages.splice(k, 1);
+    E.pages.delete(id);
+    E.dirty.delete(id);
+    pgSelected.delete(id);
+    const c = caches.get(id);
+    if (c) { c.canvas.width = c.canvas.height = 0; caches.delete(id); }
+    await db.deletePageData(E.doc.id, id);
+  }
+  // 消したページに関する履歴は捨てる
+  const gone = new Set(ids);
+  const strip = (list) => list.map((ent) => ent.filter((e) => !gone.has(e.pageId))).filter((ent) => ent.length);
   E.undo = strip(E.undo);
   E.redo = strip(E.redo);
   updateUndoUI();
-  await db.deletePageData(E.doc.id, id);
-  pgSel = Math.min(pgSel, pageCount() - 1);
-  afterPageOp();
+  if (pgSelectMode && !pgSelected.size) pgSelectMode = false;
+  await afterPageOp();
+  showPage(currentPage(), cam.z);
+  toast(ids.length === 1 ? 'ページを削除した' : `${ids.length}ページを削除した`);
+  return true;
+}
+$('pgSelectBtn').addEventListener('click', () => {
+  pgSelectMode = !pgSelectMode;
+  pgSelected.clear();
+  renderPageGrid();
 });
+$('pgSelAll').addEventListener('click', () => {
+  const all = pgSelected.size === pageCount();
+  pgSelected.clear();
+  if (!all) for (const id of E.doc.pages) pgSelected.add(id);
+  renderPageGrid();
+});
+$('pgDelSel').addEventListener('click', () => deletePagesAsk([...pgSelected]));
+$('pgAddEnd').addEventListener('click', () => {
+  insertPage(pageCount());
+  afterPageOp().then(() => $('pageGrid').lastElementChild?.scrollIntoView({ block: 'nearest' }));
+});
+$('delPageBtn').addEventListener('click', () => deletePagesAsk([E.doc.pages[currentPage()]]));
+$('pagesBtn').addEventListener('click', openPagesDialog);
+
 $('undoBtn').addEventListener('click', () => undo());
 $('redoBtn').addEventListener('click', () => redo());
 $('pageBtn').addEventListener('click', openPagesDialog);
@@ -1723,6 +1802,21 @@ async function renderList() {
     ul.appendChild(li);
   }
 }
+/** 確認ダイアログ(ブラウザ標準の confirm は全画面を解除してしまうので自前)。OKなら true */
+function askConfirm(message, okLabel = 'OK', danger = false, alertOnly = false) {
+  const dlg = $('confirmDlg');
+  $('confirmMsg').textContent = message;
+  $('confirmOk').textContent = okLabel;
+  $('confirmOk').className = 'btn ' + (danger ? 'danger-fill' : 'primary');
+  $('confirmCancel').hidden = alertOnly;
+  dlg.returnValue = '';
+  dlg.showModal();
+  return new Promise((resolve) => {
+    dlg.addEventListener('close', () => resolve(dlg.returnValue === 'ok'), { once: true });
+  });
+}
+$('confirmOk').addEventListener('click', () => $('confirmDlg').close('ok'));
+
 function showMenu(x, y, items) {
   closeMenu();
   const m = document.createElement('div');
@@ -1736,7 +1830,9 @@ function showMenu(x, y, items) {
     b.addEventListener('click', () => { closeMenu(); it.fn(); });
     m.appendChild(b);
   }
-  document.body.appendChild(m);
+  // モーダル表示中はその中に置かないと、ダイアログの下に隠れて触れない
+  const dlgs = [...document.querySelectorAll('dialog[open]')];
+  (dlgs[dlgs.length - 1] || document.body).appendChild(m);
   const r = m.getBoundingClientRect();
   m.style.left = clamp(x - r.width, 8, window.innerWidth - r.width - 8) + 'px';
   m.style.top = clamp(y, 8, window.innerHeight - r.height - 8) + 'px';
@@ -1802,7 +1898,7 @@ async function dupDoc(doc) {
   cloud.syncSoon(1000);
 }
 async function removeDoc(doc) {
-  if (!confirm(`「${doc.title}」を削除する？（元に戻せない）`)) return;
+  if (!(await askConfirm(`「${doc.title}」を削除する？\n元に戻せない。`, '削除', true))) return;
   await db.deleteDoc(doc.id);
   cloud.forgetDoc(doc);
   renderList();
@@ -1942,8 +2038,8 @@ $('syncLamp').addEventListener('click', openSyncDialog);
 $('syncLampE').addEventListener('click', openSyncDialog);
 $('syncNowBtn').addEventListener('click', () => cloud.syncNow());
 $('syncConnect').addEventListener('click', () => { $('syncDlg').close(); cloud.connect(); });
-$('syncDisconnect').addEventListener('click', () => {
-  if (!confirm('Dropboxとの接続を切る？（作品はこの端末に残る）')) return;
+$('syncDisconnect').addEventListener('click', async () => {
+  if (!(await askConfirm('Dropboxとの接続を切る？\n作品はこの端末に残る。', '切断', true))) return;
   cloud.disconnect();
 });
 

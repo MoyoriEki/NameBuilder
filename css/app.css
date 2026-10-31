@@ -190,14 +190,28 @@ input[type=checkbox], input[type=radio] { width: 18px; height: 18px; accent-colo
   flex: 1; overflow-y: auto; padding: 14px; display: grid; gap: 14px;
   grid-template-columns: repeat(auto-fill, minmax(110px, 1fr)); align-content: start;
 }
-.pg { cursor: pointer; text-align: center; font-size: 12px; color: var(--muted); }
+.pg { cursor: pointer; font-size: 12px; color: var(--muted); }
 .pg-thumb {
-  aspect-ratio: 2508 / 3541; background: #fff; border-radius: 4px; box-shadow: 0 1px 4px rgba(0, 0, 0, 0.18);
-  border: 3px solid transparent; overflow: hidden; margin-bottom: 4px;
+  position: relative; aspect-ratio: 2508 / 3541; background: #fff; border-radius: 4px;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.18); border: 3px solid transparent; overflow: hidden;
 }
 .pg-thumb img { width: 100%; height: 100%; object-fit: contain; display: block; }
-.pg.sel .pg-thumb { border-color: var(--accent); }
-.pg.sel { color: var(--accent); font-weight: 600; }
+.pg.cur .pg-thumb { border-color: var(--accent); }
+.pg.cur .pg-num { color: var(--accent); font-weight: 600; }
+.pg-row { display: flex; align-items: center; justify-content: space-between; margin-top: 2px; }
+.pg-more { border: none; background: none; width: 36px; height: 28px; border-radius: 6px; font-size: 16px; cursor: pointer; color: #556; }
+.pg-more:hover { background: #eef0f2; }
+.page-grid.selecting .pg-more { visibility: hidden; }
+.pg-check {
+  display: none; position: absolute; top: 6px; right: 6px; width: 24px; height: 24px; border-radius: 50%;
+  background: rgba(255, 255, 255, 0.9); box-shadow: inset 0 0 0 2px #9aa0a6;
+}
+.page-grid.selecting .pg-check { display: block; }
+.pg.checked .pg-check { background: var(--danger); box-shadow: none; }
+.pg.checked .pg-check::after { content: '✓'; color: #fff; font-size: 15px; font-weight: 700; position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; }
+.pg.checked .pg-thumb { border-color: var(--danger); }
+.btn.danger-fill { background: var(--danger); color: #fff; border-color: var(--danger); }
+.confirm-msg { white-space: pre-wrap; font-size: 15px; line-height: 1.6; }
 
 /* 起動失敗時の案内 */
 .boot-error {
