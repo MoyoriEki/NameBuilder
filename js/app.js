@@ -6,10 +6,10 @@
    - 描画中の線だけは重ねキャンバス(#live)に描き、
      ペンを離したらページのキャッシュへ焼き込む
    ============================================================ */
-import * as db from './db.js?v=17';
-import { drawStroke, drawLiveStroke, isOpacityStroke, opacityAt, bbox, bboxHit, hitStroke, eraseSplit, sweep } from './ink.js?v=17';
-import { pngWithDpi, makeZip } from './zip.js?v=17';
-import * as cloud from './cloud.js?v=17';
+import * as db from './db.js?v=18';
+import { drawStroke, drawLiveStroke, isOpacityStroke, opacityAt, bbox, bboxHit, hitStroke, eraseSplit, sweep } from './ink.js?v=18';
+import { pngWithDpi, makeZip } from './zip.js?v=18';
+import * as cloud from './cloud.js?v=18';
 
 const PAGE_W = 2508, PAGE_H = 3541, DPI = 350;
 const GAP = 140;                 // ページ間の隙間(page-px)
@@ -924,16 +924,25 @@ function touchMove(e) {
   const ref = gest.ref;
   if (ref && ref.n === cur.n) {
     const dx = cur.cx - ref.cx, dy = cur.cy - ref.cy;
-    if (cur.n >= 2 && ref.d > 0 && cur.d > 0) zoomAt(cur.cx, cur.cy, cur.d / ref.d);
-    const a = area();
-    const fitsX = PAGE_W * cam.z <= a.x1 - a.x0 + 1;
-    if (pageMode() && cur.n === 1 && !flip.anim && (fitsX || flip.dx !== 0)) {
-      // ページ送り: 横の動きはページをめくる方へ。隣が無い方向はゴムのように少しだけ動く
-      const nd = flip.dx + dx;
-      const hasNeighbor = canFlipSide(nd > 0 ? -1 : 1);
-      flip.dx = hasNeighbor ? nd : flip.dx + dx * 0.3;
-      cam.y -= dy / cam.z;
+    if (pageMode() && cur.n === 1) {
+      // 送りモードの指1本は「めくる」だけ。横の動きだけを拾い、縦には動かさない。
+      // 触っただけでぶれないよう、横に一定以上・縦より大きく動いてから追従を始める。
+      // 指2本でつまんだ後に残った1本は何もしない
+      if (gest.max === 1 && !flip.anim) {
+        const s0 = gest.start.get(e.pointerId);
+        if (!gest.flipping && s0) {
+          const tx = Math.abs(t.x - s0.x), ty = Math.abs(t.y - s0.y);
+          if (tx > 14 && tx > ty) gest.flipping = true;
+        }
+        if (gest.flipping) {
+          // 隣が無い方向(1ページ目の前)はゴムのように少しだけ動く
+          const nd = flip.dx + dx;
+          flip.dx = canFlipSide(nd > 0 ? -1 : 1) ? nd : flip.dx + dx * 0.3;
+        }
+      }
     } else {
+      // 指2本(送りモード)/縦スクロールモード: 移動と拡大
+      if (cur.n >= 2 && ref.d > 0 && cur.d > 0) zoomAt(cur.cx, cur.cy, cur.d / ref.d);
       if (flip.dx && !flip.anim) animateFlip(0);
       cam.x -= dx / cam.z;
       cam.y -= dy / cam.z;
@@ -969,7 +978,7 @@ function touchUp(e) {
     else if (flip.dx < 0 && (flip.dx < -th || vx < -0.45) && canFlipSide(1)) flipCommit(1);
     else animateFlip(0);
     return;
-  } else if (g.max === 1 && g.vel.length >= 2) {
+  } else if (g.max === 1 && g.vel.length >= 2 && !pageMode()) {
     const a = g.vel[0], b = g.vel[g.vel.length - 1];
     const dt = b.t - a.t;
     if (dt > 0 && now() - b.t < 60) startInertia((b.x - a.x) / dt, (b.y - a.y) / dt);
