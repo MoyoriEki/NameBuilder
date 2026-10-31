@@ -196,3 +196,10 @@ input[type=checkbox], input[type=radio] { width: 18px; height: 18px; accent-colo
 .pg-thumb img { width: 100%; height: 100%; object-fit: contain; display: block; }
 .pg.sel .pg-thumb { border-color: var(--accent); }
 .pg.sel { color: var(--accent); font-weight: 600; }
+
+/* 起動失敗時の案内 */
+.boot-error {
+  position: fixed; left: 50%; top: 30%; transform: translateX(-50%); z-index: 100;
+  width: min(420px, 92vw); padding: 20px; border-radius: 14px; background: #fff; box-shadow: var(--shadow);
+  display: flex; flex-direction: column; gap: 12px; align-items: flex-start;
+}

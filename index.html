@@ -9,7 +9,7 @@
 <link rel="icon" type="image/svg+xml" href="icon.svg">
 <link rel="apple-touch-icon" href="apple-touch-icon.png">
 <link rel="manifest" href="manifest.webmanifest">
-<link rel="stylesheet" href="css/app.css">
+<link rel="stylesheet" href="css/app.css?v=6">
 <title>ネームビルダー</title>
 </head>
 <body>
@@ -173,6 +173,37 @@
   <div class="actions"><button class="btn" type="button" data-close>閉じる</button></div>
 </dialog>
 
-<script type="module" src="js/app.js"></script>
+<!-- 起動に失敗したとき(古いファイルと新しいファイルが混ざった等)の逃げ道。
+     本体が起動し終えると window.__nbReady が立つ。立たなければ「読み込み直す」を出す -->
+<div id="bootError" class="boot-error" hidden>
+  <p>アプリの読み込みに失敗した（古いファイルが残っているかも）。</p>
+  <button id="bootReload" type="button" class="btn primary">最新版を読み込み直す</button>
+  <p id="bootDetail" class="muted small"></p>
+</div>
+<script>
+(function () {
+  var shown = false;
+  function show(msg) {
+    if (window.__nbReady || shown) return;
+    shown = true;
+    document.getElementById('bootError').hidden = false;
+    if (msg) document.getElementById('bootDetail').textContent = String(msg);
+  }
+  window.addEventListener('error', function (e) { show(e.message); });
+  window.addEventListener('unhandledrejection', function (e) { show(e.reason && e.reason.message); });
+  window.addEventListener('load', function () { setTimeout(function () { show('起動しなかった'); }, 3000); });
+  document.getElementById('bootReload').onclick = async function () {
+    try {
+      var regs = await (navigator.serviceWorker ? navigator.serviceWorker.getRegistrations() : []);
+      for (var r of regs) await r.unregister();
+      if (window.caches) for (var k of await caches.keys()) await caches.delete(k);
+    } catch (_) {}
+    location.reload();
+  };
+})();
+</script>
+<!-- 版番号(?v=)は css/js を変えるたびに index.html と js/app.js の両方で上げる。
+     新旧のファイルが混ざって読み込みに失敗するのを防ぐため -->
+<script type="module" src="js/app.js?v=6"></script>
 </body>
 </html>

@@ -6,9 +6,9 @@
    - 描画中の線だけは重ねキャンバス(#live)に描き、
      ペンを離したらページのキャッシュへ焼き込む
    ============================================================ */
-import * as db from './db.js';
-import { drawStroke, drawLiveStroke, isOpacityStroke, bbox, bboxHit, hitStroke, eraseSplit, sweep } from './ink.js';
-import { pngWithDpi, makeZip } from './zip.js';
+import * as db from './db.js?v=6';
+import { drawStroke, drawLiveStroke, isOpacityStroke, bbox, bboxHit, hitStroke, eraseSplit, sweep } from './ink.js?v=6';
+import { pngWithDpi, makeZip } from './zip.js?v=6';
 
 const PAGE_W = 2508, PAGE_H = 3541, DPI = 350;
 const GAP = 140;                 // ページ間の隙間(page-px)
@@ -1709,6 +1709,8 @@ if (history.state?.doc) history.replaceState(null, '');
 if ('serviceWorker' in navigator && location.protocol === 'https:') {
   navigator.serviceWorker.register('sw.js').catch(() => {});
 }
+
+window.__nbReady = true; // 起動完了(index.html の起動失敗チェック用)
 
 // テスト用フック
 window.__nb = { get E() { return E; }, cam, settings, flushSave, caches };

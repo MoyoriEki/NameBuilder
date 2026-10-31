@@ -1,10 +1,9 @@
 /* オフラインでも開けるようにする最小のService Worker。
    方針: ネットワーク優先 → 失敗したらキャッシュ。更新が即反映され、
    オフライン時だけ前回の版で起動する(古い版に固定される事故を避ける) */
-const CACHE = 'namebuilder-v4';
+const CACHE = 'namebuilder-v6';
 const SHELL = [
-  './', 'index.html', 'probe.html', 'css/app.css',
-  'js/app.js', 'js/db.js', 'js/ink.js', 'js/zip.js',
+  './', 'index.html', 'probe.html',
   'vendor/perfect-freehand.mjs', 'manifest.webmanifest', 'icon.svg', 'icon-192.png', 'icon-512.png',
 ];
 
@@ -22,7 +21,9 @@ self.addEventListener('fetch', (e) => {
   const req = e.request;
   if (req.method !== 'GET' || new URL(req.url).origin !== location.origin) return;
   e.respondWith(
-    fetch(req)
+    // cache:'no-cache' = ブラウザのHTTPキャッシュを使わず、毎回サーバーに新しいか確かめる。
+    // GitHub Pagesは10分キャッシュさせるので、これが無いと新旧のファイルが混ざることがある
+    fetch(req, { cache: 'no-cache' })
       .then((res) => {
         if (res.ok) {
           const copy = res.clone();
