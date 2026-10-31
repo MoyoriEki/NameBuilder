@@ -1,7 +1,7 @@
 /* オフラインでも開けるようにする最小のService Worker。
    方針: ネットワーク優先 → 失敗したらキャッシュ。更新が即反映され、
    オフライン時だけ前回の版で起動する(古い版に固定される事故を避ける) */
-const CACHE = 'namebuilder-v11';
+const CACHE = 'namebuilder-v12';
 const SHELL = [
   './', 'index.html', 'probe.html',
   'vendor/perfect-freehand.mjs', 'manifest.webmanifest', 'icon.svg', 'icon-192.png', 'icon-512.png',

@@ -6,10 +6,10 @@
    - 描画中の線だけは重ねキャンバス(#live)に描き、
      ペンを離したらページのキャッシュへ焼き込む
    ============================================================ */
-import * as db from './db.js?v=11';
-import { drawStroke, drawLiveStroke, isOpacityStroke, bbox, bboxHit, hitStroke, eraseSplit, sweep } from './ink.js?v=11';
-import { pngWithDpi, makeZip } from './zip.js?v=11';
-import * as cloud from './cloud.js?v=11';
+import * as db from './db.js?v=12';
+import { drawStroke, drawLiveStroke, isOpacityStroke, bbox, bboxHit, hitStroke, eraseSplit, sweep } from './ink.js?v=12';
+import { pngWithDpi, makeZip } from './zip.js?v=12';
+import * as cloud from './cloud.js?v=12';
 
 const PAGE_W = 2508, PAGE_H = 3541, DPI = 350;
 const GAP = 140;                 // ページ間の隙間(page-px)
@@ -1344,6 +1344,8 @@ $('pgDel').addEventListener('click', async () => {
   pgSel = Math.min(pgSel, pageCount() - 1);
   afterPageOp();
 });
+$('undoBtn').addEventListener('click', () => undo());
+$('redoBtn').addEventListener('click', () => redo());
 $('pageBtn').addEventListener('click', openPagesDialog);
 $('prevBtn').addEventListener('click', () => flipTo(-1));
 $('nextBtn').addEventListener('click', () => flipTo(1));
