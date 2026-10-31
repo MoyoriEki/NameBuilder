@@ -7,7 +7,7 @@
      ペンを離したらページのキャッシュへ焼き込む
    ============================================================ */
 import * as db from './db.js';
-import { strokePath, livePath, drawStroke, bbox, bboxHit, hitStroke, eraseSplit, sweep } from './ink.js';
+import { drawStroke, drawLiveStroke, isOpacityStroke, bbox, bboxHit, hitStroke, eraseSplit, sweep } from './ink.js';
 import { pngWithDpi, makeZip } from './zip.js';
 
 const PAGE_W = 2508, PAGE_H = 3541, DPI = 350;
@@ -498,10 +498,13 @@ function drawLive() {
     tctx.rect(0, 0, PAGE_W, PAGE_H);
     tctx.clip();
     const pts = drawing.pred.length ? drawing.pts.concat(drawing.pred) : drawing.pts;
-    tctx.fillStyle = drawing.st.c;
-    tctx.fill(livePath(drawing.st, pts, false));
+    drawLiveStroke(tctx, drawing.st, pts, false);
     tctx.restore();
     if (settings.lowLatency) inkCv.style.visibility = 'visible';
+    // 濃さが変わる線は darken で重ねる。重ねキャンバス自体も画面と darken 合成して、
+    // 描いている途中に下の濃い線を薄く覆ってしまわないようにする
+    const blend = !settings.lowLatency && isOpacityStroke(drawing.st) ? 'darken' : '';
+    if (liveCv.style.mixBlendMode !== blend) liveCv.style.mixBlendMode = blend;
   }
   if (cursor && (erasing || isEraserTool())) {
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
@@ -622,14 +625,7 @@ function makeThumb(id, ps) {
   ctx.fillRect(0, 0, THUMB_W, THUMB_H);
   const s = THUMB_W / PAGE_W;
   ctx.setTransform(s, 0, 0, s, 0, 0);
-  ctx.lineWidth = 0.7 / s;
-  ctx.lineJoin = 'round';
-  for (const st of ps.strokes) {
-    const path = strokePath(st);
-    ctx.fillStyle = ctx.strokeStyle = st.c;
-    ctx.fill(path);
-    ctx.stroke(path);
-  }
+  for (const st of ps.strokes) drawStroke(ctx, st, 0.7 / s);
   return new Promise((res) => cv.toBlob((b) => res(b), 'image/webp', 0.85));
 }
 
@@ -667,6 +663,13 @@ function wantsEraser(e) {
 }
 
 /* ---- 線 ---- */
+const isWhite = (c) => /^#f{6}$/i.test(c);
+/** ペン設定 → ストロークの描き方。白(修正用)は darken だと見えないので濃さ変化は付けない */
+function penStroke(pen) {
+  const st = { c: pen.c, w: pen.w, t: pen.pr ? PEN_THINNING : 0 };
+  if (pen.op && !isWhite(pen.c)) st.o = pen.omin ?? 0.15;
+  return st;
+}
 function startStroke(e) {
   const [wx, wy] = toWorld(e);
   const hit = pageAt(wx, wy);
@@ -678,7 +681,7 @@ function startStroke(e) {
     id: e.pointerId,
     pageId: hit.id,
     top: hit.top,
-    st: { c: pen.c, w: pen.w, t: pen.pr ? PEN_THINNING : 0 },
+    st: penStroke(pen),
     pts: [],
     pred: [],
     sm: null,
@@ -1136,6 +1139,10 @@ function openPenDialog(i) {
   $('penWidth').value = p.w;
   $('penWidthOut').textContent = p.w;
   $('penPressure').checked = p.pr;
+  $('penOpacity').checked = !!p.op;
+  $('penOmin').value = p.omin ?? 0.15;
+  $('penOminOut').textContent = Math.round((p.omin ?? 0.15) * 100);
+  syncOpacityRow();
   drawPenPreview();
   if (!$('penDlg').open) $('penDlg').showModal();
 }
@@ -1153,6 +1160,17 @@ $('penWidth').addEventListener('input', (e) => {
   updatePen({ w });
 });
 $('penPressure').addEventListener('change', (e) => updatePen({ pr: e.target.checked }));
+$('penOpacity').addEventListener('change', (e) => { updatePen({ op: e.target.checked }); syncOpacityRow(); });
+$('penOmin').addEventListener('input', (e) => {
+  const v = Number(e.target.value);
+  $('penOminOut').textContent = Math.round(v * 100);
+  updatePen({ omin: v });
+});
+function syncOpacityRow() {
+  const p = settings.pens[editingPen];
+  $('penOminRow').hidden = !p.op;
+  $('penOpacityNote').hidden = !(p.op && isWhite(p.c));
+}
 function drawPenPreview() {
   const cv = $('penPreview');
   const ctx = cv.getContext('2d');
@@ -1170,8 +1188,7 @@ function drawPenPreview() {
     pts.push([x, y, Math.pow(Math.sin(t * Math.PI), 1.2) * 0.95 + 0.05]);
   }
   ctx.setTransform(s, 0, 0, s, 0, 0);
-  ctx.fillStyle = p.c;
-  ctx.fill(livePath({ c: p.c, w: p.w, t: p.pr ? PEN_THINNING : 0 }, pts, true));
+  drawLiveStroke(ctx, penStroke(p), pts, true);
 }
 
 /* ---- 消しゴム設定 ---- */
@@ -1339,10 +1356,36 @@ async function renderPagePng(strokes, white) {
   const ctx = exportCanvas.getContext('2d');
   ctx.setTransform(1, 0, 0, 1, 0, 0);
   ctx.clearRect(0, 0, PAGE_W, PAGE_H);
-  if (white) { ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, PAGE_W, PAGE_H); }
+  // いったん白い紙の上に描いてから、透明指定なら「白→透明」に変換する。
+  // 濃さが変わる線(白と混ぜた色で描いている)や白ペンも、透明背景で正しく抜ける
+  ctx.fillStyle = '#fff';
+  ctx.fillRect(0, 0, PAGE_W, PAGE_H);
   for (const st of strokes) drawStroke(ctx, st);
+  if (!white) whiteToAlpha(ctx);
   const blob = await new Promise((res) => exportCanvas.toBlob(res, 'image/png'));
   return pngWithDpi(blob, DPI);
+}
+/** 白を透明に: 白の上に (色c, 不透明度a) を重ねた結果 P から a と c を逆算する。
+ *  a = 1 - min(R,G,B)/255、c = (P - 255(1-a)) / a。白の上に戻すと元と同じ見た目になる */
+function whiteToAlpha(ctx) {
+  const STRIP = 512; // メモリを食わないよう帯に分けて処理
+  for (let y = 0; y < PAGE_H; y += STRIP) {
+    const h = Math.min(STRIP, PAGE_H - y);
+    const img = ctx.getImageData(0, y, PAGE_W, h);
+    const d = img.data;
+    for (let i = 0; i < d.length; i += 4) {
+      const r = d[i], g = d[i + 1], b = d[i + 2];
+      const m = r < g ? (r < b ? r : b) : (g < b ? g : b);
+      if (m === 255) { d[i + 3] = 0; continue; }
+      const a = (255 - m) / 255;
+      const k = 255 * (1 - a);
+      d[i] = Math.round((r - k) / a);
+      d[i + 1] = Math.round((g - k) / a);
+      d[i + 2] = Math.round((b - k) / a);
+      d[i + 3] = Math.round(a * 255);
+    }
+    ctx.putImageData(img, 0, y);
+  }
 }
 function download(blob, name) {
   const a = document.createElement('a');

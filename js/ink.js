@@ -1,6 +1,7 @@
 /* ============================================================
    ストローク(線)の幾何
-   stroke = { c:'#rrggbb', w:最大太さ(page-px), t:筆圧の効き(0=一定), p:Float32Array[x,y,pr, …] }
+   stroke = { c:'#rrggbb', w:最大太さ(page-px), t:筆圧の効き(0=一定), p:Float32Array[x,y,pr, …],
+              o?:筆圧0のときの濃さ(0..1。あれば「筆圧で濃さが変わる線」) }
    - 点列はページ座標(0..W, 0..H)。手ブレ補正は入力時に済ませた後の座標を保存する
      (描き直し・部分消しで形が変わらないよう、描画側では平滑化をかけない)
    - 輪郭は perfect-freehand で生成し、Path2D をストロークごとにキャッシュ
@@ -69,9 +70,92 @@ export function livePath(st, points, last = false) {
   return outlineToPath(getStroke(points, pfOptions(st, last)));
 }
 
-export function drawStroke(ctx, st) {
+/* ---- 筆圧で濃さが変わる線 ----
+   半透明の部品を重ねると重なった所だけ濃くなって数珠状になるので、
+   「白と混ぜた不透明な色」で描き、合成を darken(各チャンネルの小さい方=濃い方を残す)にする。
+   白い紙の上ではクリスタの「筆圧→不透明度」とほぼ同じ見え方になり、同じ線の中で
+   重なっても濃くならない。濃さは32段階に丸め、段階ごとに1つの Path2D にまとめて塗る */
+export const isOpacityStroke = (st) => st.o !== undefined && st.o < 1;
+const LEVELS = 32;
+const groupCache = new WeakMap();
+
+function mixWhite(hex, a) {
+  const n = parseInt(hex.slice(1), 16);
+  const ch = (v) => Math.round(255 - a * (255 - v));
+  return `rgb(${ch((n >> 16) & 255)},${ch((n >> 8) & 255)},${ch(n & 255)})`;
+}
+function addCircle(path, x, y, r) {
+  path.moveTo(x + r, y);
+  path.arc(x, y, r, 0, Math.PI * 2, true);
+}
+/** points: [[x,y,pr], …] → [{ color, path }] (濃さの段階ごと) */
+function buildGroups(st, points) {
+  const groups = new Map();
+  const pathOf = (lvl) => {
+    let p = groups.get(lvl);
+    if (!p) { p = new Path2D(); groups.set(lvl, p); }
+    return p;
+  };
+  const level = (pr) => Math.round((st.o + (1 - st.o) * Math.min(1, Math.max(0, pr))) * LEVELS);
+  const rad = (pr) => Math.max(0.3, radiusAt(st, pr));
+  const n = points.length;
+  if (n === 1) {
+    const [x, y, pr] = points[0];
+    addCircle(pathOf(level(pr)), x, y, rad(pr));
+  }
+  for (let i = 0; i < n - 1; i++) {
+    const [ax, ay, ap] = points[i], [bx, by, bp] = points[i + 1];
+    const ra = rad(ap), rb = rad(bp);
+    const path = pathOf(level((ap + bp) / 2));
+    addCircle(path, ax, ay, ra);
+    if (i === n - 2) addCircle(path, bx, by, rb);
+    const len = Math.hypot(bx - ax, by - ay);
+    if (len < 1e-6) continue;
+    const nx = -(by - ay) / len, ny = (bx - ax) / len;
+    // 円(反時計回り)と同じ向きで四角形を作る。向きが揃っていれば非ゼロ規則で穴があかない
+    path.moveTo(ax + nx * ra, ay + ny * ra);
+    path.lineTo(bx + nx * rb, by + ny * rb);
+    path.lineTo(bx - nx * rb, by - ny * rb);
+    path.lineTo(ax - nx * ra, ay - ny * ra);
+    path.closePath();
+  }
+  return [...groups].map(([lvl, path]) => ({ color: mixWhite(st.c, lvl / LEVELS), path }));
+}
+function fillGroups(ctx, groups, thicken) {
+  const prev = ctx.globalCompositeOperation;
+  ctx.globalCompositeOperation = 'darken';
+  for (const { color, path } of groups) {
+    ctx.fillStyle = color;
+    ctx.fill(path);
+    if (thicken) { ctx.strokeStyle = color; ctx.lineWidth = thicken; ctx.stroke(path); }
+  }
+  ctx.globalCompositeOperation = prev;
+}
+
+/** thicken: 輪郭をこの太さで縁取って太らせる(縮小サムネ用) */
+export function drawStroke(ctx, st, thicken = 0) {
+  if (isOpacityStroke(st)) {
+    let g = groupCache.get(st);
+    if (!g) { g = buildGroups(st, toInput(st.p)); groupCache.set(st, g); }
+    fillGroups(ctx, g, thicken);
+    return;
+  }
+  const path = strokePath(st);
   ctx.fillStyle = st.c;
-  ctx.fill(strokePath(st));
+  ctx.fill(path);
+  if (thicken) {
+    ctx.strokeStyle = st.c;
+    ctx.lineWidth = thicken;
+    ctx.lineJoin = 'round';
+    ctx.stroke(path);
+  }
+}
+
+/** 描画中(未確定)の線を描く。points は [x,y,pr] の配列 */
+export function drawLiveStroke(ctx, st, points, last = false) {
+  if (isOpacityStroke(st)) { fillGroups(ctx, buildGroups(st, points), 0); return; }
+  ctx.fillStyle = st.c;
+  ctx.fill(livePath(st, points, last));
 }
 
 /** [minX, minY, maxX, maxY](太さ込み) */
@@ -159,7 +243,7 @@ export function eraseSplit(st, x, y, r) {
   // 1点だけ残った切れ端は点として残ると汚いので捨てる
   return pieces
     .filter((a) => a.length >= 6)
-    .map((a) => ({ c: st.c, w: st.w, t: st.t, p: new Float32Array(a) }));
+    .map((a) => ({ ...st, p: new Float32Array(a) }));
 }
 
 /** 消しゴムのドラッグ1区間(前回位置→今回位置)を、半径の半分刻みで補間した円の列にする */
