@@ -12,18 +12,26 @@
    - 競合(同じ作品を両方の端末で変えた): どちらも捨てない。
      Dropbox側の版を「（別端末の版）」として別作品に取り込み、こちらの版で上書きする
    ============================================================ */
-import * as db from './db.js?v=8';
+import * as db from './db.js?v=9';
 
 const BASE = '/NameBuilder';
 const PREFIX = 'namebuilder';
 const TOMB_KEY = 'nb_tombstones';   // 削除したがDropboxからまだ消せていない作品ID
-const PB_PREFIX = 'plotboard';      // プロットボードの接続情報(同一オリジンの localStorage)
+// 同じオリジン(moyorieki.github.io)のほかのアプリが localStorage に持っているDropbox接続。
+// これを借りれば、ネームビルダー用に Redirect URI を登録しなくても繋がる
+const BORROW_SOURCES = [
+  { prefix: 'plotboard', name: 'プロットボード' },
+  { prefix: 'dbxfiler', name: 'Fileviewer' },
+  { prefix: 'mdapp', name: 'MDエディタ' },
+];
 
 let storage = null;
 let hooks = null;
 let running = null, again = false, timer = 0;
 let state = 'off';      // off | idle | syncing | error | offline
 let lastError = '';
+let phase = '';         // syncing 中の段階: pull(取り込み) | push(アップロード) | delete(削除の反映)
+let lastSyncAt = 0;     // 最後に同期が最後まで成功した時刻
 const listeners = new Set();
 
 /* ---------------- 公開API ---------------- */
@@ -61,7 +69,10 @@ export function onStatus(fn) { listeners.add(fn); fn(status()); }
 
 /** 一覧などに出す状態 */
 export function status() {
-  return { state, error: lastError, connected: connected(), available: available(), canBorrow: canBorrowPlotboard() };
+  return {
+    state, phase, error: lastError, lastSyncAt,
+    connected: connected(), available: available(), borrow: borrowSources(),
+  };
 }
 
 /** ローカルで作品が変わった。pageIds = 中身が変わったページ、docChanged = タイトルや並びが変わった */
@@ -107,16 +118,21 @@ export function syncNow() {
     do {
       again = false;
       if (!navigator.onLine) { setState('offline'); break; }
-      setState('syncing');
       try {
+        setPhase('delete');
         await processTombstones();
+        setPhase('pull');
         await pullAll();
+        setPhase('push');
         await pushAll();
         lastError = '';
+        lastSyncAt = Date.now();
+        phase = '';
         setState('idle');
       } catch (e) {
         console.warn('[sync] 失敗', e);
-        lastError = String(e?.message || e).slice(0, 200);
+        lastError = String(e?.message || e).slice(0, 300);
+        phase = '';
         setState('error');
         break;
       }
@@ -125,21 +141,31 @@ export function syncNow() {
   return running;
 }
 
-/* ---- プロットボードの接続を借りる(同じDropboxアプリなら再認証なしで繋がる) ---- */
-function canBorrowPlotboard() {
-  if (!storage || connected() || window.__NB_TEST_BRIDGE) return false;
-  return !!(localStorage.getItem(`${PB_PREFIX}_dbx_refresh`) && localStorage.getItem(`${PB_PREFIX}_dbx_key`));
+/* ---- ほかのモヨリアプリの接続を借りる(同じDropboxアプリなら再認証なしで繋がる) ---- */
+function borrowSources() {
+  if (!storage || connected() || window.__NB_TEST_BRIDGE) return [];
+  return BORROW_SOURCES.filter(({ prefix }) =>
+    localStorage.getItem(`${prefix}_dbx_refresh`) && localStorage.getItem(`${prefix}_dbx_key`));
 }
-export function borrowPlotboard() {
+export function borrowFrom(prefix) {
   for (const k of ['key', 'token', 'refresh']) {
-    const v = localStorage.getItem(`${PB_PREFIX}_dbx_${k}`);
+    const v = localStorage.getItem(`${prefix}_dbx_${k}`);
     if (v) localStorage.setItem(`${PREFIX}_dbx_${k}`, v);
   }
   localStorage.removeItem(`${PREFIX}_dbx_reauth`);
   location.reload(); // ブリッジは起動時に保存済みトークンから接続し直す
 }
+export function connect() { storage?._ui?._onBtnClick ? storage._ui._onBtnClick() : storage?.connect(); }
+export function disconnect() { storage?.disconnect(); }
 
 /* ---------------- 内部 ---------------- */
+/** 進み具合だけ変える(ランプの「取り込み中/アップロード中」用) */
+function setPhase(p) {
+  phase = p;
+  setState('syncing');
+}
+/** ローカルで変わった(未同期が増えた)ことをランプに伝える */
+export function touch() { setState(state); }
 function setState(s) {
   state = s;
   const st = status();

@@ -6,10 +6,10 @@
    - 描画中の線だけは重ねキャンバス(#live)に描き、
      ペンを離したらページのキャッシュへ焼き込む
    ============================================================ */
-import * as db from './db.js?v=8';
-import { drawStroke, drawLiveStroke, isOpacityStroke, bbox, bboxHit, hitStroke, eraseSplit, sweep } from './ink.js?v=8';
-import { pngWithDpi, makeZip } from './zip.js?v=8';
-import * as cloud from './cloud.js?v=8';
+import * as db from './db.js?v=9';
+import { drawStroke, drawLiveStroke, isOpacityStroke, bbox, bboxHit, hitStroke, eraseSplit, sweep } from './ink.js?v=9';
+import { pngWithDpi, makeZip } from './zip.js?v=9';
+import * as cloud from './cloud.js?v=9';
 
 const PAGE_W = 2508, PAGE_H = 3541, DPI = 350;
 const GAP = 140;                 // ページ間の隙間(page-px)
@@ -642,7 +642,7 @@ async function flushSave() {
     })
     .finally(() => { st.saving = null; });
   await st.saving;
-  if (contentChanged) cloud.syncSoon();
+  if (contentChanged) { cloud.touch(); cloud.syncSoon(); }
 }
 
 const THUMB_W = 200, THUMB_H = Math.round((THUMB_W * PAGE_H) / PAGE_W);
@@ -1750,6 +1750,8 @@ window.addEventListener('resize', () => resize());
 /* ============================================================
    Dropbox同期の表示
    ============================================================ */
+const PHASE_TEXT = { pull: '取り込み中…', push: 'アップロード中…', delete: '削除を反映中…' };
+let syncUiSeq = 0;
 cloud.initCloud({
   openDoc: () => E?.doc || null,
   openStrokes: (doc, pid) => (E && E.doc === doc ? E.pages.get(pid)?.strokes || null : null),
@@ -1765,29 +1767,60 @@ cloud.initCloud({
 });
 let lastCloud = cloud.status();
 cloud.onStatus((st) => { lastCloud = st; updateSyncUI(); });
+/** ランプ: 緑=同期済み / 黄=未同期(少し待つと自動で上がる) / 青点滅=アップロード中 /
+ *  水色点滅=取り込み中 / 赤=エラー / 灰=オフライン / 白抜き=未接続 */
 async function updateSyncUI() {
+  const seq = ++syncUiSeq;
   const st = lastCloud;
-  const info = $('syncInfo'), dot = $('syncDot');
-  $('borrowBtn').hidden = !st.canBorrow;
-  $('syncBtn').hidden = !st.connected;
-  let text = '', cls = '';
-  if (!st.available) { text = 'Dropbox連携を読み込めなかった（オフライン？）'; cls = 'off'; }
-  else if (!st.connected) { text = ''; cls = 'off'; }
-  else if (st.state === 'syncing') { text = '同期中…'; cls = 'busy'; }
-  else if (st.state === 'offline') { text = 'オフライン（つながったら同期）'; cls = 'pending'; }
-  else if (st.state === 'error') { text = '同期に失敗した'; cls = 'error'; }
-  else {
-    const n = (await db.listDocs()).filter((d) => cloud.isDirty(d)).length;
-    text = n ? `未同期 ${n}件` : '同期済み';
-    cls = n ? 'pending' : 'ok';
+  let cls, text;
+  let pending = 0;
+  if (st.connected) pending = (await db.listDocs()).filter((d) => cloud.isDirty(d)).length;
+  if (seq !== syncUiSeq) return; // 新しい呼び出しが来ていたら古い結果は捨てる
+  if (!st.available) { cls = 'off'; text = 'Dropbox連携を読み込めなかった'; }
+  else if (!st.connected) { cls = 'off'; text = '未接続'; }
+  else if (st.state === 'syncing') { cls = st.phase === 'push' ? 'push' : 'pull'; text = PHASE_TEXT[st.phase] || '同期中…'; }
+  else if (st.state === 'offline') { cls = 'offline'; text = pending ? `オフライン（未同期 ${pending}件）` : 'オフライン'; }
+  else if (st.state === 'error') { cls = 'error'; text = '同期エラー'; }
+  else if (pending) { cls = 'pending'; text = `未同期 ${pending}件`; }
+  else { cls = 'ok'; text = '同期済み'; }
+  for (const el of [$('syncLamp'), $('syncLampE')]) {
+    el.querySelector('.lamp').className = 'lamp ' + cls;
+    el.title = 'Dropbox: ' + text;
   }
-  info.textContent = text;
-  info.title = st.error || '';
-  dot.className = 'sync-dot ' + cls;
-  dot.title = text || 'Dropbox未接続';
+  $('syncLamp').querySelector('.lamp-text').textContent = text;
+  // ダイアログ
+  $('syncDlgLamp').className = 'lamp ' + cls;
+  $('syncState').textContent = text;
+  const lines = [];
+  if (st.connected && st.lastSyncAt) lines.push('最後に同期: ' + new Date(st.lastSyncAt).toLocaleTimeString('ja-JP'));
+  if (st.connected && cls === 'pending') lines.push('描いてから20秒ほどで自動で上がる。すぐ上げたいときは「今すぐ同期」');
+  if (st.state === 'error' && st.error) lines.push('内容: ' + st.error);
+  if (!st.available) lines.push('通信できないか、storage-bridge が読み込めなかった。つながる所で開き直すと使える');
+  $('syncDetail').textContent = lines.join('\n');
+  const box = $('syncBorrow');
+  box.innerHTML = '';
+  for (const src of st.borrow || []) {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'btn';
+    b.textContent = `${src.name}のDropbox接続を使う`;
+    b.addEventListener('click', () => cloud.borrowFrom(src.prefix));
+    box.appendChild(b);
+  }
+  $('syncHint').hidden = st.connected || !st.available;
+  $('syncConnect').hidden = st.connected || !st.available;
+  $('syncDisconnect').hidden = !st.connected;
+  $('syncNowBtn').hidden = !st.connected;
 }
-$('syncBtn').addEventListener('click', () => cloud.syncNow());
-$('borrowBtn').addEventListener('click', () => cloud.borrowPlotboard());
+function openSyncDialog() { updateSyncUI(); $('syncDlg').showModal(); }
+$('syncLamp').addEventListener('click', openSyncDialog);
+$('syncLampE').addEventListener('click', openSyncDialog);
+$('syncNowBtn').addEventListener('click', () => cloud.syncNow());
+$('syncConnect').addEventListener('click', () => { $('syncDlg').close(); cloud.connect(); });
+$('syncDisconnect').addEventListener('click', () => {
+  if (!confirm('Dropboxとの接続を切る？（作品はこの端末に残る）')) return;
+  cloud.disconnect();
+});
 
 /* ---- 起動 ---- */
 renderDock();

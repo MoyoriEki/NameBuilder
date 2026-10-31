@@ -204,17 +204,30 @@ input[type=checkbox], input[type=radio] { width: 18px; height: 18px; accent-colo
   display: flex; flex-direction: column; gap: 12px; align-items: flex-start;
 }
 
-/* ---------- Dropbox同期 ---------- */
-.dbx-mount .sb-ui { gap: 8px; }
-.dbx-mount .sb-status { font-size: 12px; }
-.dbx-mount .sb-connect-btn { border-radius: 8px; padding: 6px 12px; background: #fff; }
-.sync-info { font-size: 12px; color: var(--muted); white-space: nowrap; }
-.sync-dot { width: 9px; height: 9px; border-radius: 50%; flex: none; background: #c4c9ce; }
-.sync-dot.off { display: none; }
-.sync-dot.ok { background: #2f9e5b; }
-.sync-dot.busy { background: var(--accent); animation: syncpulse 1s ease-in-out infinite; }
-.sync-dot.pending { background: #e0a21e; }
-.sync-dot.error { background: var(--danger); }
-@keyframes syncpulse { 50% { opacity: 0.3; } }
-#editor.vbar .sync-dot { margin: 4px 0; }
-@media (max-width: 640px) { .sync-info { display: none; } }
+/* ---------- Dropbox同期(ランプ) ---------- */
+.dbx-mount .sb-ui { display: none; } /* 接続ボタン類は同期ダイアログにまとめる(App key入力のモーダルだけ使う) */
+.sync-lamp {
+  display: flex; align-items: center; gap: 6px; height: 32px; padding: 0 10px;
+  border: 1px solid var(--line); border-radius: 16px; background: #fff; cursor: pointer;
+  font-size: 12px; color: var(--muted); white-space: nowrap;
+}
+.sync-lamp.compact { width: 32px; padding: 0; justify-content: center; border-color: transparent; background: transparent; }
+.lamp {
+  width: 10px; height: 10px; border-radius: 50%; flex: none; display: inline-block;
+  background: #c4c9ce; box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.08);
+}
+.lamp.off { background: transparent; box-shadow: inset 0 0 0 1.5px #b3b9bf; }
+.lamp.ok { background: #2f9e5b; box-shadow: 0 0 6px rgba(47, 158, 91, 0.55); }
+.lamp.pending { background: #e0a21e; box-shadow: 0 0 6px rgba(224, 162, 30, 0.55); }
+.lamp.push { background: #3b78d8; animation: lampblink 0.8s ease-in-out infinite; }
+.lamp.pull { background: #19a3b8; animation: lampblink 0.8s ease-in-out infinite; }
+.lamp.error { background: var(--danger); box-shadow: 0 0 6px rgba(197, 48, 48, 0.6); }
+.lamp.offline { background: #9aa0a6; }
+@keyframes lampblink { 50% { opacity: 0.25; } }
+.sync-head { display: flex; align-items: center; gap: 8px; font-size: 15px; font-weight: 600; }
+.sync-head .lamp { width: 12px; height: 12px; }
+.borrow-list { display: flex; flex-direction: column; gap: 6px; }
+.borrow-list:empty { display: none; }
+#syncHint code { font-size: 12px; user-select: all; -webkit-user-select: all; }
+#syncDetail { white-space: pre-wrap; word-break: break-all; }
+#editor.vbar .sync-lamp.compact { margin: 2px 0; }

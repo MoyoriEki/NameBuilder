@@ -19,7 +19,7 @@
 <!-- Dropbox連携の共通ライブラリ(無改造で利用)。読み込めなければローカルのみで動く -->
 <link rel="stylesheet" href="https://moyorieki.github.io/storage-bridge/storage-bridge.css">
 <script src="https://moyorieki.github.io/storage-bridge/storage-bridge.js"></script>
-<link rel="stylesheet" href="css/app.css?v=8">
+<link rel="stylesheet" href="css/app.css?v=9">
 <title>ネームビルダー</title>
 </head>
 <body>
@@ -29,9 +29,7 @@
   <header class="bar">
     <h1 class="app-title">ネームビルダー</h1>
     <span class="grow"></span>
-    <span id="syncInfo" class="sync-info"></span>
-    <button id="syncBtn" class="ibtn" type="button" title="今すぐ同期" hidden>⟳</button>
-    <button id="borrowBtn" class="btn" type="button" hidden title="同じオリジンのプロットボードに保存されたDropbox接続をそのまま使う">プロットボードの接続を使う</button>
+    <button id="syncLamp" class="sync-lamp" type="button" title="Dropbox同期"><span class="lamp off"></span><span class="lamp-text">未接続</span></button>
     <div id="dbxMount" class="dbx-mount"></div>
     <button id="listSettingsBtn" class="ibtn" type="button" title="設定">⚙</button>
   </header>
@@ -52,7 +50,7 @@
   <header id="topbar" class="bar topbar">
     <button id="backBtn" class="ibtn" type="button" title="一覧へ戻る">‹</button>
     <span id="docTitle" class="doc-title"></span>
-    <span id="syncDot" class="sync-dot off"></span>
+    <button id="syncLampE" class="sync-lamp compact" type="button" title="Dropbox同期"><span class="lamp off"></span></button>
     <span class="grow"></span>
     <button id="undoBtn" class="ibtn" type="button" title="元に戻す (Ctrl+Z)" disabled>↶</button>
     <button id="redoBtn" class="ibtn" type="button" title="やり直す (Ctrl+Shift+Z)" disabled>↷</button>
@@ -148,6 +146,22 @@
   </div>
 </dialog>
 
+<!-- ============ Dropbox同期 ============ -->
+<dialog id="syncDlg" class="pop">
+  <h2>Dropbox同期</h2>
+  <p class="sync-head"><span id="syncDlgLamp" class="lamp off"></span><span id="syncState"></span></p>
+  <p id="syncDetail" class="muted small"></p>
+  <div id="syncBorrow" class="borrow-list"></div>
+  <p id="syncHint" class="muted small">「Dropbox 接続」でつなぐ場合は、先にDropboxのアプリ設定（<a href="https://www.dropbox.com/developers/apps" target="_blank" rel="noopener">App Console</a> → 使っているアプリ → Settings → OAuth 2 → Redirect URIs）に<br><code>https://moyorieki.github.io/NameBuilder/</code><br>を追加しておくこと。上のボタンでほかのアプリの接続を借りるなら登録は要らない。</p>
+  <div class="actions">
+    <button id="syncDisconnect" class="btn danger" type="button">切断</button>
+    <span class="grow"></span>
+    <button id="syncConnect" class="btn" type="button">Dropbox 接続</button>
+    <button id="syncNowBtn" class="btn primary" type="button">今すぐ同期</button>
+    <button class="btn" type="button" data-close>閉じる</button>
+  </div>
+</dialog>
+
 <!-- ============ 設定 ============ -->
 <dialog id="settingsDlg" class="pop wide">
   <h2>設定</h2>
@@ -219,6 +233,6 @@
 </script>
 <!-- 版番号(?v=)は css/js を変えるたびに index.html と js/app.js の両方で上げる。
      新旧のファイルが混ざって読み込みに失敗するのを防ぐため -->
-<script type="module" src="js/app.js?v=8"></script>
+<script type="module" src="js/app.js?v=9"></script>
 </body>
 </html>

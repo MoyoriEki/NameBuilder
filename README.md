@@ -28,9 +28,10 @@
 
 [storage-bridge](https://github.com/MoyoriEki/storage-bridge) を無改造で使う（`js/cloud.js`）。ローカル（IndexedDB）が常に一次ストレージで、Dropboxはバックアップ兼ほかの端末との受け渡し。未接続・オフラインでも全機能が使える。
 
-- **つなぎ方**: 作品一覧の右上。
-  - **「プロットボードの接続を使う」**（プロットボードでDropboxに接続済みなら出る）: 同じオリジンの localStorage にあるプロットボードの接続情報（App key・トークン）をコピーして、そのまま接続する。再認証もRedirect URIの登録も要らない
+- **つなぎ方**: 同期ランプ（一覧の右上・編集画面のバー）をタップして開く「Dropbox同期」から。
+  - **「〇〇のDropbox接続を使う」**: 同じオリジン（moyorieki.github.io）のほかのアプリ（プロットボード=`plotboard_`、Fileviewer=`dbxfiler_`、MDエディタ=`mdapp_`）が localStorage に持っている接続情報（App key・トークン）をコピーして、そのまま接続する。再認証もRedirect URIの登録も要らない
   - **「Dropbox 接続」**: 通常の認証。Dropboxのアプリ設定（App Console → Settings → OAuth 2 → Redirect URIs）に **`https://moyorieki.github.io/NameBuilder/`** を登録しておくこと。`…/index.html` で開かれても起動時に `…/` へ直すので、登録はこの1つでよい
+- **同期ランプ**: 緑=同期済み／黄=未同期（描いてから約20秒で自動で上がる）／青の点滅=アップロード中／水色の点滅=取り込み中／赤=エラー／灰=オフライン／白抜き=未接続。タップで詳しい状態（最後に同期した時刻・エラー内容）と「今すぐ同期」「切断」。storage-bridge の標準の接続UIは隠し、App key入力のモーダルだけ使う
 - **配置**（`/NameBuilder` 以下）: `{作品ID}/doc.json`（タイトル・ページの並び）、`{作品ID}/pages/{ページID}.nbp`（線データ）、`_deleted/{作品ID}`（削除の目印）。フォルダ名は作品IDなので、名前を変えても移動は要らない
 - **ページ単位で上げる**: 作品ごとに `doc.sync = { docRev, pageRev, dirtyPages, docDirty, seq }` を持ち、描いたページだけを上げる。`seq` は「上げている最中に描き足されたか」を見分ける番号で、描き足されたページは未同期のまま残って次の同期で上がる
 - **線データの形式（.nbp）**: `'NBP1'` | メタJSON長 | メタJSON（`[[色, 太さ, 筆圧の効き, 濃さ|null, 点数], …]`）| Int16 x,y（1/8px単位）| Uint8 筆圧。全体を gzip して `'NBZ1'` を前に付ける（`CompressionStream`が無ければ生のまま）。ローカル（Float32）の半分以下＋圧縮
