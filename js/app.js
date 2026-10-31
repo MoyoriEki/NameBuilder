@@ -6,10 +6,10 @@
    - 描画中の線だけは重ねキャンバス(#live)に描き、
      ペンを離したらページのキャッシュへ焼き込む
    ============================================================ */
-import * as db from './db.js?v=13';
-import { drawStroke, drawLiveStroke, isOpacityStroke, opacityAt, bbox, bboxHit, hitStroke, eraseSplit, sweep } from './ink.js?v=13';
-import { pngWithDpi, makeZip } from './zip.js?v=13';
-import * as cloud from './cloud.js?v=13';
+import * as db from './db.js?v=15';
+import { drawStroke, drawLiveStroke, isOpacityStroke, opacityAt, bbox, bboxHit, hitStroke, eraseSplit, sweep } from './ink.js?v=15';
+import { pngWithDpi, makeZip } from './zip.js?v=15';
+import * as cloud from './cloud.js?v=15';
 
 const PAGE_W = 2508, PAGE_H = 3541, DPI = 350;
 const GAP = 140;                 // ページ間の隙間(page-px)
@@ -48,6 +48,7 @@ const DEFAULTS = {
   barMode: 'auto',    // auto=横長画面なら縦バー / top / side
   pmax: 0.7,          // この筆圧で最大の太さになる
   lowLatency: false,  // 低遅延描画(実験的)
+  fullscreen: true,   // 全画面(Androidの上のステータスバーと下のナビゲーションバーを隠す)
 };
 const settings = (() => {
   let s = {};
@@ -1565,6 +1566,7 @@ async function openSettings() {
   $('fingerDraw').checked = settings.fingerDraw;
   $('tapUndo').checked = settings.tapUndo;
   $('lowLatency').checked = settings.lowLatency;
+  $('fullscreen').checked = settings.fullscreen;
   for (const r of document.querySelectorAll('input[name=dockSide]')) r.checked = r.value === settings.dockSide;
   for (const n of ['viewMode', 'readDir', 'barMode']) {
     for (const r of document.querySelectorAll(`input[name=${n}]`)) r.checked = r.value === settings[n];
@@ -1588,6 +1590,33 @@ $('sideEraser').addEventListener('change', (e) => { settings.sideEraser = e.targ
 $('fingerDraw').addEventListener('change', (e) => { settings.fingerDraw = e.target.checked; saveSettings(); });
 $('tapUndo').addEventListener('change', (e) => { settings.tapUndo = e.target.checked; saveSettings(); });
 $('lowLatency').addEventListener('change', (e) => { settings.lowLatency = e.target.checked; saveSettings(); hideInk(); });
+$('fullscreen').addEventListener('change', (e) => {
+  settings.fullscreen = e.target.checked;
+  saveSettings();
+  if (settings.fullscreen) enterFullscreen();
+  else if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
+});
+
+/* ---- 全画面 ----
+   ブラウザの決まりで、全画面への切り替えはタップなどの操作をきっかけにしかできない。
+   設定がオンなら、指やペンを離したタイミングで切り替える(描いている途中に画面の大きさが
+   変わらないよう、押した瞬間ではなく離した瞬間)。manifest も display: fullscreen にしてあるので、
+   ホーム画面から起動したアプリは最初から全画面になる(その場合はここでは何もしない) */
+const fullscreenCapable = () => !!document.documentElement.requestFullscreen;
+const inFullscreen = () => !!document.fullscreenElement || matchMedia('(display-mode: fullscreen)').matches;
+let fsPending = false;
+function enterFullscreen() {
+  if (!settings.fullscreen || !fullscreenCapable() || inFullscreen() || fsPending) return;
+  fsPending = true;
+  const done = () => { fsPending = false; };
+  document.documentElement.requestFullscreen({ navigationUI: 'hide' }).then(done, done);
+  setTimeout(done, 2000); // 返事が来ないまま固まった場合の保険
+}
+// 描画の後始末(stage の pointerup)が済んだ後に動くよう、バブリング段階で受ける
+document.addEventListener('pointerup', () => {
+  if (drawing || erasing || touches.size) return;
+  enterFullscreen();
+});
 for (const r of document.querySelectorAll('input[name=dockSide]')) {
   r.addEventListener('change', () => { settings.dockSide = r.value; saveSettings(); renderDock(); relayout(); });
 }
@@ -1720,13 +1749,32 @@ function closeMenu() {
   $('popMenu')?.remove();
   document.removeEventListener('pointerdown', onMenuOutside, true);
 }
+/** 作品名の入力(ブラウザ標準の prompt は全画面を解除してしまうので自前のダイアログ)。キャンセルなら null */
+function askName(heading, value, okLabel) {
+  const dlg = $('nameDlg'), input = $('nameInput');
+  $('nameHeading').textContent = heading;
+  $('nameOk').textContent = okLabel;
+  input.value = value;
+  dlg.returnValue = '';
+  dlg.showModal();
+  input.focus();
+  input.select();
+  return new Promise((resolve) => {
+    dlg.addEventListener('close', () => resolve(dlg.returnValue === 'ok' ? input.value : null), { once: true });
+  });
+}
+$('nameForm').addEventListener('submit', (e) => {
+  e.preventDefault();
+  $('nameDlg').close('ok');
+});
+
 function defaultTitle() {
   const d = new Date();
   const p = (n) => String(n).padStart(2, '0');
   return `ネーム ${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
 }
 $('newDocBtn').addEventListener('click', async () => {
-  const title = prompt('作品名', defaultTitle());
+  const title = await askName('新しいネーム', defaultTitle(), '作る');
   if (title === null) return;
   const t = new Date().toISOString();
   const doc = { id: uid('doc'), title: title.trim() || defaultTitle(), createdAt: t, updatedAt: t, w: PAGE_W, h: PAGE_H, pages: [uid('pg')] };
@@ -1736,7 +1784,7 @@ $('newDocBtn').addEventListener('click', async () => {
   openDoc(doc.id);
 });
 async function renameDoc(doc) {
-  const t = prompt('作品名', doc.title);
+  const t = await askName('名前を変更', doc.title, '変更');
   if (t === null || !t.trim()) return;
   doc.title = t.trim();
   doc.updatedAt = new Date().toISOString();
