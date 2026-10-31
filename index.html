@@ -19,7 +19,7 @@
 <!-- Dropbox連携の共通ライブラリ(無改造で利用)。読み込めなければローカルのみで動く -->
 <link rel="stylesheet" href="https://moyorieki.github.io/storage-bridge/storage-bridge.css">
 <script src="https://moyorieki.github.io/storage-bridge/storage-bridge.js"></script>
-<link rel="stylesheet" href="css/app.css?v=19">
+<link rel="stylesheet" href="css/app.css?v=20">
 <title>ネームビルダー</title>
 </head>
 <body>
@@ -208,6 +208,10 @@
     <label><input type="radio" name="barMode" value="top"> 上</label>
     <label><input type="radio" name="barMode" value="side"> 縦</label>
   </div>
+  <label class="row col">めくりの軽さ <span class="muted small">右ほど少しの指の動きでめくれる</span> <span><output id="flipEaseOut"></output></span>
+    <input id="flipEase" type="range" min="1" max="5" step="1"></label>
+  <label class="row col">隣のページの近さ <span class="muted small">めくるとき隣のページが出てくる位置。左ほど近い（0%=すぐ横）</span> <span><output id="flipNearOut"></output></span>
+    <input id="flipNear" type="range" min="0" max="1" step="0.05"></label>
   <label class="row col">手ブレ補正 <span><output id="stabOut"></output></span>
     <input id="stab" type="range" min="0" max="0.9" step="0.05"></label>
   <label class="row col">筆圧の上限 <span class="muted small">この強さで最大の太さになる</span> <span><output id="pmaxOut"></output></span>
@@ -261,6 +265,6 @@
 </script>
 <!-- 版番号(?v=)は css/js を変えるたびに index.html と js/app.js の両方で上げる。
      新旧のファイルが混ざって読み込みに失敗するのを防ぐため -->
-<script type="module" src="js/app.js?v=19"></script>
+<script type="module" src="js/app.js?v=20"></script>
 </body>
 </html>

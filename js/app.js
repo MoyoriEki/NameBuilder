@@ -6,10 +6,10 @@
    - 描画中の線だけは重ねキャンバス(#live)に描き、
      ペンを離したらページのキャッシュへ焼き込む
    ============================================================ */
-import * as db from './db.js?v=19';
-import { drawStroke, drawLiveStroke, isOpacityStroke, opacityAt, bbox, bboxHit, hitStroke, eraseSplit, sweep } from './ink.js?v=19';
-import { pngWithDpi, makeZip } from './zip.js?v=19';
-import * as cloud from './cloud.js?v=19';
+import * as db from './db.js?v=20';
+import { drawStroke, drawLiveStroke, isOpacityStroke, opacityAt, bbox, bboxHit, hitStroke, eraseSplit, sweep } from './ink.js?v=20';
+import { pngWithDpi, makeZip } from './zip.js?v=20';
+import * as cloud from './cloud.js?v=20';
 
 const PAGE_W = 2508, PAGE_H = 3541, DPI = 350;
 const GAP = 140;                 // ページ間の隙間(page-px)
@@ -47,6 +47,8 @@ const DEFAULTS = {
   readDir: 'rtl',     // rtl=右開き(漫画・次のページは左) / ltr=左開き
   barMode: 'auto',    // auto=横長画面なら縦バー / top / side
   pmax: 0.7,          // この筆圧で最大の太さになる
+  flipEase: 3,        // めくりの軽さ 1(重い)〜5(軽い)
+  flipNear: 0.35,     // 隣のページの近さ(今のページの端から画面の端までのうち、どれだけ離して置くか。0=すぐ横 1=画面の外)
   lowLatency: false,  // 低遅延描画(実験的)
   fullscreen: true,   // 作品を開いている間は全画面(Androidの上のステータスバーと下のナビゲーションバーを隠す)
 };
@@ -292,8 +294,20 @@ function flipDist(side) {
   const pw = PAGE_W * cam.z;
   const left = -cam.x * cam.z, right = left + pw;
   const edge = side < 0 ? left : viewW - right;
-  return Math.max(0, edge) + FLIP_GAP + pw;
+  return Math.max(0, edge) * settings.flipNear + FLIP_GAP + pw;
 }
+/** めくりの軽さ(1〜5)ごとの判定値。
+ *  start: 指が横にこれだけ動いたらページが付いてくる(px) / ratio: 横の動きが縦の何倍以上か
+ *  commit: 離したとき、画面幅のこの割合以上ずれていればめくる / speed: これより速く払えばめくる(px/ms) */
+const FLIP_EASE = [
+  null,
+  { start: 34, ratio: 1.6, commit: 0.20, speed: 0.55 },
+  { start: 26, ratio: 1.4, commit: 0.15, speed: 0.45 },
+  { start: 18, ratio: 1.2, commit: 0.11, speed: 0.35 },
+  { start: 12, ratio: 1.0, commit: 0.08, speed: 0.27 },
+  { start: 8, ratio: 0.9, commit: 0.05, speed: 0.2 },
+];
+const flipEase = () => FLIP_EASE[clamp(Math.round(settings.flipEase || 3), 1, 5)];
 
 /* ---- メニューバーの向き ---- */
 function applyLayout() {
@@ -941,13 +955,14 @@ function touchMove(e) {
     const dx = cur.cx - ref.cx, dy = cur.cy - ref.cy;
     if (pageMode() && cur.n === 1) {
       // 送りモードの指1本は「めくる」だけ。横の動きだけを拾い、縦には動かさない。
-      // 触っただけでぶれないよう、横に30px以上・縦の1.5倍以上動いてから追従を始める。
+      // 触っただけでぶれないよう、横に一定以上・縦より大きく動いてから追従を始める(設定「めくりの軽さ」)。
       // 指2本でつまんだ後に残った1本は何もしない
       if (gest.max === 1 && !flip.anim) {
         const s0 = gest.start.get(e.pointerId);
         if (!gest.flipping && s0) {
           const tx = Math.abs(t.x - s0.x), ty = Math.abs(t.y - s0.y);
-          if (tx > 30 && tx > ty * 1.5) gest.flipping = true;
+          const fe = flipEase();
+          if (tx > fe.start && tx > ty * fe.ratio) gest.flipping = true;
         }
         if (gest.flipping) {
           // 隣が無い方向(1ページ目の前)はゴムのように少しだけ動く
@@ -956,13 +971,20 @@ function touchMove(e) {
         }
       }
     } else {
-      // 指2本(送りモード)/縦スクロールモード: 移動と拡大
-      if (cur.n >= 2 && ref.d > 0 && cur.d > 0) zoomAt(cur.cx, cur.cy, cur.d / ref.d);
+      // 指2本(送りモード)/縦スクロールモード: 移動と拡大。
+      // 指を置いている間は動ける範囲の外にも動かせる(端の先は重くなる)。離したら範囲内へ戻す
       if (flip.dx && !flip.anim) animateFlip(0);
+      if (!gest.raw) gest.raw = { x: cam.x, y: cam.y };
+      cam.x = gest.raw.x; cam.y = gest.raw.y;
+      if (cur.n >= 2 && ref.d > 0 && cur.d > 0) zoomAt(cur.cx, cur.cy, cur.d / ref.d);
       cam.x -= dx / cam.z;
       cam.y -= dy / cam.z;
+      gest.raw = { x: cam.x, y: cam.y };
+      clampCam();
+      const RUBBER = 0.45;
+      cam.x += (gest.raw.x - cam.x) * RUBBER;
+      cam.y += (gest.raw.y - cam.y) * RUBBER;
     }
-    clampCam();
     if (cur.n === 1) {
       gest.vel.push({ t: now(), x: cur.cx, y: cur.cy });
       if (gest.vel.length > 8) gest.vel.shift();
@@ -973,7 +995,7 @@ function touchMove(e) {
 }
 function touchUp(e) {
   if (!touches.delete(e.pointerId) || !gest) return;
-  if (touches.size) { gest.ref = touchInfo(); gest.vel = []; return; }
+  if (touches.size) { gest.ref = touchInfo(); gest.vel = []; gest.raw = null; return; }
   const g = gest;
   gest = null;
   const quick = now() - g.t0 < 350;
@@ -988,9 +1010,10 @@ function touchUp(e) {
     else if (g.max >= 3) redo();
   } else if (flip.dx !== 0 && !flip.anim) {
     // 指を離した: 一定以上ずらしたか、はじいたらめくる。足りなければ戻す
-    const th = Math.min(viewW * 0.18, 160);
-    if (flip.dx > 0 && (flip.dx > th || vx > 0.45) && canFlipSide(-1)) flipCommit(-1);
-    else if (flip.dx < 0 && (flip.dx < -th || vx < -0.45) && canFlipSide(1)) flipCommit(1);
+    const fe = flipEase();
+    const th = Math.min(viewW * fe.commit, 160);
+    if (flip.dx > 0 && (flip.dx > th || vx > fe.speed) && canFlipSide(-1)) flipCommit(-1);
+    else if (flip.dx < 0 && (flip.dx < -th || vx < -fe.speed) && canFlipSide(1)) flipCommit(1);
     else animateFlip(0);
     return;
   } else if (g.max === 1 && g.vel.length >= 2 && !pageMode()) {
@@ -998,7 +1021,27 @@ function touchUp(e) {
     const dt = b.t - a.t;
     if (dt > 0 && now() - b.t < 60) startInertia((b.x - a.x) / dt, (b.y - a.y) / dt);
   }
-  if (!inertia) endInteractionSoon();
+  if (!inertia) { settleCam(); endInteractionSoon(); }
+}
+/** 範囲の外に出ていたら、範囲内へ滑らかに戻す */
+function settleCam() {
+  const from = { x: cam.x, y: cam.y };
+  clampCam();
+  const to = { x: cam.x, y: cam.y };
+  if (Math.abs(to.x - from.x) * cam.z < 0.5 && Math.abs(to.y - from.y) * cam.z < 0.5) return;
+  cam.x = from.x; cam.y = from.y;
+  const t0 = now();
+  beginInteraction();
+  const step = () => {
+    const t = Math.min(1, (now() - t0) / 200);
+    const k = 1 - Math.pow(1 - t, 3);
+    cam.x = from.x + (to.x - from.x) * k;
+    cam.y = from.y + (to.y - from.y) * k;
+    requestRender();
+    if (t < 1 && !gest) requestAnimationFrame(step);
+    else endInteractionSoon();
+  };
+  requestAnimationFrame(step);
 }
 function startInertia(vx, vy) {
   if (Math.hypot(vx, vy) < 0.3) return;
@@ -1719,6 +1762,10 @@ async function openSettings() {
   for (const n of ['viewMode', 'readDir', 'barMode']) {
     for (const r of document.querySelectorAll(`input[name=${n}]`)) r.checked = r.value === settings[n];
   }
+  $('flipEase').value = settings.flipEase;
+  $('flipEaseOut').textContent = FLIP_EASE_LABEL[settings.flipEase] || settings.flipEase;
+  $('flipNear').value = settings.flipNear;
+  $('flipNearOut').textContent = Math.round(settings.flipNear * 100) + '%';
   $('pmax').value = settings.pmax;
   $('pmaxOut').textContent = settings.pmax.toFixed(2);
   $('pmaxSeen').textContent = recentMaxPressure ? `直近の最大筆圧: ${recentMaxPressure.toFixed(2)}` : '（ペンで描くと直近の最大筆圧が出る）';
@@ -1788,6 +1835,17 @@ for (const n of ['viewMode', 'readDir', 'barMode']) {
     });
   }
 }
+const FLIP_EASE_LABEL = { 1: '重い', 2: 'やや重い', 3: '標準', 4: 'やや軽い', 5: '軽い' };
+$('flipEase').addEventListener('input', (e) => {
+  settings.flipEase = Number(e.target.value);
+  $('flipEaseOut').textContent = FLIP_EASE_LABEL[settings.flipEase];
+  saveSettings();
+});
+$('flipNear').addEventListener('input', (e) => {
+  settings.flipNear = Number(e.target.value);
+  $('flipNearOut').textContent = Math.round(settings.flipNear * 100) + '%';
+  saveSettings();
+});
 $('pmax').addEventListener('input', (e) => {
   settings.pmax = Number(e.target.value);
   $('pmaxOut').textContent = settings.pmax.toFixed(2);

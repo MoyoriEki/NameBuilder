@@ -12,7 +12,7 @@
    - 競合(同じ作品を両方の端末で変えた): どちらも捨てない。
      Dropbox側の版を「（別端末の版）」として別作品に取り込み、こちらの版で上書きする
    ============================================================ */
-import * as db from './db.js?v=19';
+import * as db from './db.js?v=20';
 
 const BASE = '/NameBuilder';
 const PREFIX = 'namebuilder';
