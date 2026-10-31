@@ -6,10 +6,10 @@
    - 描画中の線だけは重ねキャンバス(#live)に描き、
      ペンを離したらページのキャッシュへ焼き込む
    ============================================================ */
-import * as db from './db.js?v=18';
-import { drawStroke, drawLiveStroke, isOpacityStroke, opacityAt, bbox, bboxHit, hitStroke, eraseSplit, sweep } from './ink.js?v=18';
-import { pngWithDpi, makeZip } from './zip.js?v=18';
-import * as cloud from './cloud.js?v=18';
+import * as db from './db.js?v=19';
+import { drawStroke, drawLiveStroke, isOpacityStroke, opacityAt, bbox, bboxHit, hitStroke, eraseSplit, sweep } from './ink.js?v=19';
+import { pngWithDpi, makeZip } from './zip.js?v=19';
+import * as cloud from './cloud.js?v=19';
 
 const PAGE_W = 2508, PAGE_H = 3541, DPI = 350;
 const GAP = 140;                 // ページ間の隙間(page-px)
@@ -175,9 +175,14 @@ const zMax = () => 2.5;
 
 /** 1軸ぶんの制限: 収まるなら領域の中央、はみ出すなら端から少し先まで動かせる */
 function clampAxis(v, lo, len, a0, a1, z) {
-  const m = 40 / z;
-  if (len <= (a1 - a0) / z) return lo + len / 2 - (a0 + a1) / 2 / z;
-  return clamp(v, lo - a0 / z - m, lo + len + m - a1 / z);
+  // ページの端から領域の3割ぶん先まで動かせる。全体が収まる倍率でも、中央から同じだけずらせる
+  // (描きやすい位置に寄せられるように)
+  const slack = ((a1 - a0) * 0.3) / z;
+  if (len <= (a1 - a0) / z) {
+    const c = lo + len / 2 - (a0 + a1) / 2 / z;
+    return clamp(v, c - slack, c + slack);
+  }
+  return clamp(v, lo - a0 / z - slack, lo + len + slack - a1 / z);
 }
 function clampCam() {
   const a = area(), z = cam.z;
@@ -270,7 +275,7 @@ function flipTo(side) {
   }
   const target = side < 0 ? leftIndex() : rightIndex();
   if (!validIndex(target)) { if (flip.dx) animateFlip(0); return; }
-  const dist = PAGE_W * cam.z + FLIP_GAP;
+  const dist = flipDist(side);
   animateFlip(side < 0 ? dist : -dist, () => {
     flip.dx = 0;
     showPage(target);
@@ -280,6 +285,15 @@ function flipTo(side) {
 function goNext() { flipTo(isRtl() ? -1 : 1); }
 function goPrev() { flipTo(isRtl() ? 1 : -1); }
 const flipping = () => flip.dx !== 0 || flip.anim !== 0;
+/** めくりで隣のページが今のページの位置まで来る距離(css-px)。隣のページは画面の外
+ *  (今のページの端から画面の端まで+少し)に置いておき、指に合わせて画面の外から滑り込ませる。
+ *  すぐ横に置くと、横長の画面では少しずらしただけで机の部分に隣のページがチラつく */
+function flipDist(side) {
+  const pw = PAGE_W * cam.z;
+  const left = -cam.x * cam.z, right = left + pw;
+  const edge = side < 0 ? left : viewW - right;
+  return Math.max(0, edge) + FLIP_GAP + pw;
+}
 
 /* ---- メニューバーの向き ---- */
 function applyLayout() {
@@ -440,12 +454,13 @@ function render() {
     const cur = curIndex(), top = cur * PITCH;
     const ox = flip.dx / z;
     drawPage(ctx, cur, ox, top, k);
-    const step = PAGE_W + FLIP_GAP / z;
     if (flip.dx > 0) {
+      const step = flipDist(-1) / z;
       if (validIndex(leftIndex())) drawPage(ctx, leftIndex(), ox - step, top, k);
       else if (isNewPageSide(-1)) drawNewPageGhost(ctx, ox - step, top);
     }
     if (flip.dx < 0) {
+      const step = flipDist(1) / z;
       if (validIndex(rightIndex())) drawPage(ctx, rightIndex(), ox + step, top, k);
       else if (isNewPageSide(1)) drawNewPageGhost(ctx, ox + step, top);
     }
@@ -702,7 +717,7 @@ function makeThumb(id, ps) {
    ============================================================ */
 let drawing = null;  // { id, pageId, top, st, pts:[[x,y,p]], pred:[], sm, minD }
 let erasing = null;  // { id, before:Map(pageId -> strokes), last:[wx,wy] }
-let penSeenAt = -1e9;
+let penSeenAt = -1e9; // ペンが最後に画面に触れていた時刻(ホバーは含めない)
 const touches = new Map(); // pointerId -> { x, y }
 let gest = null;           // { t0, max, moved, start:Map, ref, vel:[] }
 let mousePan = null;       // { id, x, y }
@@ -908,7 +923,7 @@ function touchInfo() {
 function touchDown(e) {
   stopInertia();
   touches.set(e.pointerId, { x: e.clientX, y: e.clientY });
-  if (!gest) gest = { t0: now(), max: 0, moved: false, start: new Map(), ref: null, vel: [] };
+  if (!gest) gest = { t0: now(), max: 0, moved: false, start: new Map(), ref: null, vel: [], cam0: { ...cam } };
   gest.start.set(e.pointerId, { x: e.clientX, y: e.clientY });
   gest.max = Math.max(gest.max, touches.size);
   gest.ref = touchInfo();
@@ -926,13 +941,13 @@ function touchMove(e) {
     const dx = cur.cx - ref.cx, dy = cur.cy - ref.cy;
     if (pageMode() && cur.n === 1) {
       // 送りモードの指1本は「めくる」だけ。横の動きだけを拾い、縦には動かさない。
-      // 触っただけでぶれないよう、横に一定以上・縦より大きく動いてから追従を始める。
+      // 触っただけでぶれないよう、横に30px以上・縦の1.5倍以上動いてから追従を始める。
       // 指2本でつまんだ後に残った1本は何もしない
       if (gest.max === 1 && !flip.anim) {
         const s0 = gest.start.get(e.pointerId);
         if (!gest.flipping && s0) {
           const tx = Math.abs(t.x - s0.x), ty = Math.abs(t.y - s0.y);
-          if (tx > 14 && tx > ty) gest.flipping = true;
+          if (tx > 30 && tx > ty * 1.5) gest.flipping = true;
         }
         if (gest.flipping) {
           // 隣が無い方向(1ページ目の前)はゴムのように少しだけ動く
@@ -1009,6 +1024,13 @@ function stopInertia() {
   if (inertia) { inertia = null; endInteractionSoon(); }
 }
 function cancelGesture() {
+  // 掌でページが動いた直後にペンが触れた → 掌の動きはなかったことにする
+  if (gest && now() - gest.t0 < 1500) {
+    Object.assign(cam, gest.cam0);
+    if (flip.dx && !flip.anim) flip.dx = 0;
+    clampCam();
+    requestRender();
+  }
   touches.clear();
   gest = null;
   stopInertia();
@@ -1065,7 +1087,7 @@ function startTool(e) {
 
 stage.addEventListener('pointermove', (e) => {
   if (!E) return;
-  if (e.pointerType === 'pen') penSeenAt = now();
+  if (e.pointerType === 'pen' && e.buttons) penSeenAt = now();
   if (drawing && e.pointerId === drawing.id) { moveStroke(e); return; }
   if (erasing && e.pointerId === erasing.id) { moveErase(e); return; }
   if (mousePan && e.pointerId === mousePan.id) {
@@ -1089,6 +1111,7 @@ stage.addEventListener('pointermove', (e) => {
 
 function pointerEnd(e) {
   if (!E) return;
+  if (e.pointerType === 'pen') penSeenAt = now();
   if (drawing && e.pointerId === drawing.id) {
     // キャンセル(OSに奪われた等)でも描いた分は残す
     endStroke(e);
