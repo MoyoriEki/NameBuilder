@@ -19,7 +19,7 @@
 <!-- Dropbox連携の共通ライブラリ(無改造で利用)。読み込めなければローカルのみで動く -->
 <link rel="stylesheet" href="https://moyorieki.github.io/storage-bridge/storage-bridge.css">
 <script src="https://moyorieki.github.io/storage-bridge/storage-bridge.js"></script>
-<link rel="stylesheet" href="css/app.css?v=12">
+<link rel="stylesheet" href="css/app.css?v=13">
 <title>ネームビルダー</title>
 </head>
 <body>
@@ -82,10 +82,18 @@
     <input id="penWidth" type="range" min="1" max="120" step="1"></label>
   <label class="row"><input id="penPressure" type="checkbox"> 筆圧で太さを変える</label>
   <label class="row"><input id="penOpacity" type="checkbox"> 筆圧で濃さを変える</label>
-  <label id="penOminRow" class="row col">いちばん弱いときの濃さ <span><output id="penOminOut"></output>%</span>
-    <input id="penOmin" type="range" min="0" max="0.9" step="0.05"></label>
+  <div id="penOpacityBox" class="sub-box">
+    <label class="row col">いちばん弱いときの濃さ <span><output id="penOminOut"></output>%</span>
+      <input id="penOmin" type="range" min="0" max="0.9" step="0.05"></label>
+    <label class="row col">真っ黒になる強さ <span class="muted small">左ほど軽い力で真っ黒になる</span> <span>筆圧 <output id="penOfullOut"></output>%</span>
+      <input id="penOfull" type="range" min="0.15" max="1" step="0.05"></label>
+    <label class="row col">濃くなり方 <span class="muted small">左ほど軽い力のうちから早く濃くなる</span> <span><output id="penOgammaOut"></output></span>
+      <input id="penOgamma" type="range" min="0.3" max="2" step="0.05"></label>
+    <div class="row"><span class="grow"></span><button id="penOpacityReset" class="btn" type="button">濃淡を標準に戻す</button></div>
+  </div>
   <p id="penOpacityNote" class="muted small">白ペンは濃さを変えられない（修正用なので常に不透明）</p>
-  <canvas id="penPreview" class="preview" width="560" height="120"></canvas>
+  <canvas id="penPreview" class="preview" width="560" height="240"></canvas>
+  <div class="row"><span id="penTestInfo" class="muted small grow"></span><button id="penTestClear" class="btn" type="button">試し描きを消す</button></div>
   <div class="actions"><button class="btn" value="close" type="button" data-close>閉じる</button></div>
 </dialog>
 
@@ -231,6 +239,6 @@
 </script>
 <!-- 版番号(?v=)は css/js を変えるたびに index.html と js/app.js の両方で上げる。
      新旧のファイルが混ざって読み込みに失敗するのを防ぐため -->
-<script type="module" src="js/app.js?v=12"></script>
+<script type="module" src="js/app.js?v=13"></script>
 </body>
 </html>

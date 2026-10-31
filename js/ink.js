@@ -1,7 +1,8 @@
 /* ============================================================
    ストローク(線)の幾何
    stroke = { c:'#rrggbb', w:最大太さ(page-px), t:筆圧の効き(0=一定), p:Float32Array[x,y,pr, …],
-              o?:筆圧0のときの濃さ(0..1。あれば「筆圧で濃さが変わる線」) }
+              o?:筆圧0のときの濃さ(0..1。あれば「筆圧で濃さが変わる線」),
+              of?:真っ黒(濃さ100%)になる筆圧(0..1。無ければ1), og?:濃さのカーブ(無ければ1) }
    - 点列はページ座標(0..W, 0..H)。手ブレ補正は入力時に済ませた後の座標を保存する
      (描き直し・部分消しで形が変わらないよう、描画側では平滑化をかけない)
    - 輪郭は perfect-freehand で生成し、Path2D をストロークごとにキャッシュ
@@ -76,6 +77,12 @@ export function livePath(st, points, last = false) {
    白い紙の上ではクリスタの「筆圧→不透明度」とほぼ同じ見え方になり、同じ線の中で
    重なっても濃くならない。濃さは32段階に丸め、段階ごとに1つの Path2D にまとめて塗る */
 export const isOpacityStroke = (st) => st.o !== undefined && st.o < 1;
+/** 筆圧 pr での濃さ(0..1)。筆圧 of 以上で100%、カーブ og が1未満なら軽い力で早く濃くなる */
+export function opacityAt(st, pr) {
+  const full = st.of ?? 1, g = st.og ?? 1;
+  const t = Math.min(1, Math.max(0, pr) / Math.max(0.05, full));
+  return st.o + (1 - st.o) * Math.pow(t, g);
+}
 const LEVELS = 32;
 const groupCache = new WeakMap();
 
@@ -96,7 +103,7 @@ function buildGroups(st, points) {
     if (!p) { p = new Path2D(); groups.set(lvl, p); }
     return p;
   };
-  const level = (pr) => Math.round((st.o + (1 - st.o) * Math.min(1, Math.max(0, pr))) * LEVELS);
+  const level = (pr) => Math.round(opacityAt(st, pr) * LEVELS);
   const rad = (pr) => Math.max(0.3, radiusAt(st, pr));
   const n = points.length;
   if (n === 1) {

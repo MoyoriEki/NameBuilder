@@ -12,7 +12,7 @@
    - 競合(同じ作品を両方の端末で変えた): どちらも捨てない。
      Dropbox側の版を「（別端末の版）」として別作品に取り込み、こちらの版で上書きする
    ============================================================ */
-import * as db from './db.js?v=12';
+import * as db from './db.js?v=13';
 
 const BASE = '/NameBuilder';
 const PREFIX = 'namebuilder';
@@ -406,7 +406,12 @@ const MAGIC_RAW = 0x3150424e; // 'NBP1' (little endian)
 const MAGIC_GZ = 0x315a424e;  // 'NBZ1'
 
 export async function encodePage(strokes) {
-  const meta = strokes.map((s) => [s.c, s.w, s.t, s.o ?? null, s.p.length / 3]);
+  // 6・7番目(真っ黒になる筆圧・濃さのカーブ)は後から足した。古い版は読み飛ばすだけなので互換
+  const meta = strokes.map((s) => {
+    const m = [s.c, s.w, s.t, s.o ?? null, s.p.length / 3];
+    if (s.of !== undefined || s.og !== undefined) m.push(s.of ?? null, s.og ?? null);
+    return m;
+  });
   const metaBytes = new TextEncoder().encode(JSON.stringify(meta));
   const n = strokes.reduce((a, s) => a + s.p.length / 3, 0);
   const head = 8 + metaBytes.length;
@@ -452,7 +457,7 @@ export async function decodePage(ab) {
   const pr = new Uint8Array(buf, head + pad + n * 4, n);
   const strokes = [];
   let k = 0;
-  for (const [c, w, t, o, cnt] of meta) {
+  for (const [c, w, t, o, cnt, of, og] of meta) {
     const p = new Float32Array(cnt * 3);
     for (let i = 0; i < cnt; i++, k++) {
       p[i * 3] = xy[k * 2] / Q;
@@ -461,6 +466,8 @@ export async function decodePage(ab) {
     }
     const st = { c, w, t, p };
     if (o !== null && o !== undefined) st.o = o;
+    if (of !== null && of !== undefined) st.of = of;
+    if (og !== null && og !== undefined) st.og = og;
     strokes.push(st);
   }
   return strokes;

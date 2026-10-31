@@ -6,10 +6,10 @@
    - 描画中の線だけは重ねキャンバス(#live)に描き、
      ペンを離したらページのキャッシュへ焼き込む
    ============================================================ */
-import * as db from './db.js?v=12';
-import { drawStroke, drawLiveStroke, isOpacityStroke, bbox, bboxHit, hitStroke, eraseSplit, sweep } from './ink.js?v=12';
-import { pngWithDpi, makeZip } from './zip.js?v=12';
-import * as cloud from './cloud.js?v=12';
+import * as db from './db.js?v=13';
+import { drawStroke, drawLiveStroke, isOpacityStroke, opacityAt, bbox, bboxHit, hitStroke, eraseSplit, sweep } from './ink.js?v=13';
+import { pngWithDpi, makeZip } from './zip.js?v=13';
+import * as cloud from './cloud.js?v=13';
 
 const PAGE_W = 2508, PAGE_H = 3541, DPI = 350;
 const GAP = 140;                 // ページ間の隙間(page-px)
@@ -695,9 +695,16 @@ function wantsEraser(e) {
 /* ---- 線 ---- */
 const isWhite = (c) => /^#f{6}$/i.test(c);
 /** ペン設定 → ストロークの描き方。白(修正用)は darken だと見えないので濃さ変化は付けない */
+// 濃淡の標準値。筆圧が弱めでもしっかり黒が出るように、筆圧の55%で真っ黒、
+// カーブは0.7(軽い力のうちから早めに濃くなる)にしている
+const OPACITY_DEFAULTS = { omin: 0.15, ofull: 0.55, ogamma: 0.7 };
 function penStroke(pen) {
   const st = { c: pen.c, w: pen.w, t: pen.pr ? PEN_THINNING : 0 };
-  if (pen.op && !isWhite(pen.c)) st.o = pen.omin ?? 0.15;
+  if (pen.op && !isWhite(pen.c)) {
+    st.o = pen.omin ?? OPACITY_DEFAULTS.omin;
+    st.of = pen.ofull ?? OPACITY_DEFAULTS.ofull;
+    st.og = pen.ogamma ?? OPACITY_DEFAULTS.ogamma;
+  }
   return st;
 }
 function startStroke(e) {
@@ -1170,11 +1177,21 @@ function openPenDialog(i) {
   $('penWidthOut').textContent = p.w;
   $('penPressure').checked = p.pr;
   $('penOpacity').checked = !!p.op;
-  $('penOmin').value = p.omin ?? 0.15;
-  $('penOminOut').textContent = Math.round((p.omin ?? 0.15) * 100);
+  syncOpacityInputs();
   syncOpacityRow();
+  if (!$('penDlg').open) { testStrokes = []; $('penTestInfo').textContent = '↑ ペンで試し描きできる（スライダーを動かすと描いた線にも反映）'; $('penDlg').showModal(); }
+  sizePenPreview();
   drawPenPreview();
-  if (!$('penDlg').open) $('penDlg').showModal();
+}
+function syncOpacityInputs() {
+  const p = settings.pens[editingPen];
+  const v = { ...OPACITY_DEFAULTS, ...Object.fromEntries(Object.entries({ omin: p.omin, ofull: p.ofull, ogamma: p.ogamma }).filter(([, x]) => x !== undefined)) };
+  $('penOmin').value = v.omin;
+  $('penOminOut').textContent = Math.round(v.omin * 100);
+  $('penOfull').value = v.ofull;
+  $('penOfullOut').textContent = Math.round(v.ofull * 100);
+  $('penOgamma').value = v.ogamma;
+  $('penOgammaOut').textContent = v.ogamma.toFixed(2);
 }
 function updatePen(patch) {
   Object.assign(settings.pens[editingPen], patch);
@@ -1196,10 +1213,37 @@ $('penOmin').addEventListener('input', (e) => {
   $('penOminOut').textContent = Math.round(v * 100);
   updatePen({ omin: v });
 });
+$('penOfull').addEventListener('input', (e) => {
+  const v = Number(e.target.value);
+  $('penOfullOut').textContent = Math.round(v * 100);
+  updatePen({ ofull: v });
+});
+$('penOgamma').addEventListener('input', (e) => {
+  const v = Number(e.target.value);
+  $('penOgammaOut').textContent = v.toFixed(2);
+  updatePen({ ogamma: v });
+});
+$('penOpacityReset').addEventListener('click', () => {
+  updatePen({ ...OPACITY_DEFAULTS });
+  syncOpacityInputs();
+});
 function syncOpacityRow() {
   const p = settings.pens[editingPen];
-  $('penOminRow').hidden = !p.op;
+  $('penOpacityBox').hidden = !p.op;
   $('penOpacityNote').hidden = !(p.op && isWhite(p.c));
+}
+/* ---- ペン設定の試し描き ----
+   プレビュー欄にペンで描ける。点(位置と補正済みの筆圧)だけを覚えておき、描き直すたびに
+   今のペン設定で描くので、スライダーを動かすと描いた線の見え方もその場で変わる */
+let testStrokes = [];   // [[x,y,pr], …] の配列
+let testDraw = null;
+// 画面上の見た目に近づけるため、ページを「全体表示」したときの倍率で描く
+const previewScale = () => clamp(fitPageZoom() * (window.devicePixelRatio || 1), 0.15, 2);
+function sizePenPreview() {
+  const cv = $('penPreview');
+  const d = window.devicePixelRatio || 1;
+  const w = Math.round(cv.clientWidth * d), h = Math.round(cv.clientHeight * d);
+  if (w && h && (cv.width !== w || cv.height !== h)) { cv.width = w; cv.height = h; }
 }
 function drawPenPreview() {
   const cv = $('penPreview');
@@ -1208,18 +1252,59 @@ function drawPenPreview() {
   ctx.setTransform(1, 0, 0, 1, 0, 0);
   ctx.fillStyle = p.c.toLowerCase() === '#ffffff' ? '#cfd4d9' : '#fff';
   ctx.fillRect(0, 0, cv.width, cv.height);
-  // 画面上の見た目に近づけるため、ページを「全体表示」したときの倍率で描く
-  const s = clamp(fitPageZoom() * (window.devicePixelRatio || 1), 0.15, 2);
-  const pts = [];
-  for (let i = 0; i <= 60; i++) {
-    const t = i / 60;
-    const x = (40 + t * (cv.width - 80)) / s;
-    const y = (cv.height / 2 + Math.sin(t * Math.PI * 2) * 26) / s;
-    pts.push([x, y, Math.pow(Math.sin(t * Math.PI), 1.2) * 0.95 + 0.05]);
-  }
+  const s = previewScale();
+  const st = penStroke(p);
   ctx.setTransform(s, 0, 0, s, 0, 0);
-  drawLiveStroke(ctx, penStroke(p), pts, true);
+  if (!testStrokes.length && !testDraw) {
+    // 見本: 筆圧が 弱→強→弱 と変わる線
+    const pts = [];
+    for (let i = 0; i <= 60; i++) {
+      const t = i / 60;
+      const x = (40 + t * (cv.width - 80)) / s;
+      const y = (cv.height / 2 + Math.sin(t * Math.PI * 2) * cv.height * 0.22) / s;
+      pts.push([x, y, Math.pow(Math.sin(t * Math.PI), 1.2) * 0.95 + 0.05]);
+    }
+    drawLiveStroke(ctx, st, pts, true);
+  }
+  for (const pts of testStrokes) drawLiveStroke(ctx, st, pts, true);
+  if (testDraw?.length) drawLiveStroke(ctx, st, testDraw, false);
 }
+function testPoint(e) {
+  const cv = $('penPreview');
+  const r = cv.getBoundingClientRect();
+  const d = window.devicePixelRatio || 1;
+  const s = previewScale();
+  const pr = pressureOf(e);
+  testDraw.push([((e.clientX - r.left) * d) / s, ((e.clientY - r.top) * d) / s, pr]);
+  const st = penStroke(settings.pens[editingPen]);
+  // 表示する筆圧は「筆圧の上限・カーブ」(設定)で補正した後の値。スライダーの「筆圧 ○%」と同じ物差し
+  const raw = e.pointerType === 'pen' ? `筆圧 ${Math.round(pr * 100)}%` : '（マウス/指は筆圧なし）';
+  $('penTestInfo').textContent = isOpacityStroke(st)
+    ? `${raw} → 濃さ ${Math.round(opacityAt(st, pr) * 100)}%`
+    : raw;
+}
+$('penPreview').addEventListener('pointerdown', (e) => {
+  e.preventDefault();
+  try { $('penPreview').setPointerCapture(e.pointerId); } catch (_) {}
+  testDraw = [];
+  testPoint(e);
+  drawPenPreview();
+});
+$('penPreview').addEventListener('pointermove', (e) => {
+  if (!testDraw) return;
+  const evs = e.getCoalescedEvents?.() || [];
+  for (const ev of evs.length ? evs : [e]) testPoint(ev);
+  drawPenPreview();
+});
+const endTest = () => {
+  if (!testDraw) return;
+  if (testDraw.length) testStrokes.push(testDraw);
+  testDraw = null;
+  drawPenPreview();
+};
+$('penPreview').addEventListener('pointerup', endTest);
+$('penPreview').addEventListener('pointercancel', endTest);
+$('penTestClear').addEventListener('click', () => { testStrokes = []; drawPenPreview(); });
 
 /* ---- 消しゴム設定 ---- */
 function openEraserDialog() {
