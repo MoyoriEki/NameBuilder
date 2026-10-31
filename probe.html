@@ -1,0 +1,197 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>ペン入力の診断 | ネームビルダー</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; overflow: hidden; }
+  body { font-family: system-ui, sans-serif; background: #f3f2ee; color: #2c3136; display: flex; flex-direction: column; -webkit-user-select: none; user-select: none; }
+  header { display: flex; gap: 8px; align-items: center; padding: 8px 12px; background: #fff; border-bottom: 1px solid #dfe2e5; flex-wrap: wrap; }
+  header h1 { font-size: 16px; margin-right: auto; }
+  button { font: inherit; height: 34px; padding: 0 12px; border: 1px solid #dfe2e5; border-radius: 8px; background: #fff; cursor: pointer; }
+  main { flex: 1; display: flex; min-height: 0; }
+  #pad { flex: 1; position: relative; touch-action: none; background: #fff; margin: 10px; border-radius: 8px; box-shadow: 0 1px 6px rgba(0,0,0,.12); overflow: hidden; }
+  #pad canvas { position: absolute; inset: 0; width: 100%; height: 100%; }
+  aside { width: min(360px, 42vw); overflow-y: auto; padding: 10px 12px 10px 0; font-size: 13px; }
+  h2 { font-size: 13px; margin: 12px 0 4px; color: #4a90d9; }
+  table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+  td { padding: 2px 4px; border-bottom: 1px solid #eceef0; vertical-align: top; }
+  td:first-child { color: #7a8288; white-space: nowrap; width: 1%; }
+  .ok { color: #2f9e5b; } .ng { color: #c53030; }
+  #hist { width: 100%; height: 60px; background: #fff; border: 1px solid #dfe2e5; border-radius: 6px; display: block; }
+  .note { color: #7a8288; font-size: 12px; line-height: 1.6; }
+  @media (orientation: portrait) { main { flex-direction: column; } aside { width: auto; height: 42vh; padding: 0 12px 10px; } }
+</style>
+</head>
+<body>
+<header>
+  <h1>ペン入力の診断</h1>
+  <button id="clear" type="button">クリア</button>
+  <button id="copy" type="button">結果をコピー</button>
+  <a href="./" style="font-size:13px">← アプリへ</a>
+</header>
+<main>
+  <div id="pad"><canvas id="base"></canvas><canvas id="fast"></canvas></div>
+  <aside>
+    <p class="note">ペンで左の白い所に色々な強さで描いてみて。サイドボタンを押しながら・ペンの反対側（消しゴム側）・指でも触ってみる。終わったら「結果をコピー」して貼り付けて送ってほしい。</p>
+    <h2>いまの入力</h2>
+    <table id="now"></table>
+    <h2>筆圧の分布（描いた分）</h2>
+    <canvas id="hist" width="600" height="120"></canvas>
+    <h2>集計</h2>
+    <table id="sum"></table>
+    <h2>環境</h2>
+    <table id="env"></table>
+  </aside>
+</main>
+<script>
+const pad = document.getElementById('pad');
+const base = document.getElementById('base'), fast = document.getElementById('fast');
+const bctx = base.getContext('2d');
+const fctx = fast.getContext('2d', { desynchronized: true });
+let dpr = 1;
+function size() {
+  dpr = window.devicePixelRatio || 1;
+  for (const c of [base, fast]) { c.width = pad.clientWidth * dpr; c.height = pad.clientHeight * dpr; }
+}
+new ResizeObserver(size).observe(pad);
+
+const S = {
+  types: {}, pressures: new Map(), maxPressure: 0, minPressureNZ: 1, tilt: false, twist: false, altitude: false,
+  buttonsSeen: new Set(), buttonSeen: new Set(), hover: false, events: 0, coalesced: 0, predicted: 0,
+  coalescedSupported: 'getCoalescedEvents' in PointerEvent.prototype,
+  predictedSupported: 'getPredictedEvents' in PointerEvent.prototype,
+  rates: [], widthHeight: new Set(), downPressure: [], contextmenu: 0,
+};
+let lastMove = 0, lastPt = null;
+
+function row(t, k, v, cls) { return `<tr><td>${k}</td><td class="${cls || ''}">${v}</td></tr>`; }
+function showNow(e, nc, np) {
+  document.getElementById('now').innerHTML =
+    row(0, 'type', e.pointerType) + row(0, 'pressure', e.pressure.toFixed(4)) +
+    row(0, 'tiltX / tiltY', `${e.tiltX} / ${e.tiltY}`) + row(0, 'twist', e.twist) +
+    row(0, 'altitude / azimuth', `${e.altitudeAngle?.toFixed?.(3)} / ${e.azimuthAngle?.toFixed?.(3)}`) +
+    row(0, 'button / buttons', `${e.button} / ${e.buttons}`) +
+    row(0, 'width × height', `${e.width.toFixed(1)} × ${e.height.toFixed(1)}`) +
+    row(0, 'coalesced / predicted', `${nc} / ${np}`) + row(0, 'event', e.type);
+}
+function median(a) { if (!a.length) return 0; const s = [...a].sort((x, y) => x - y); return s[s.length >> 1]; }
+function showSum() {
+  const pens = S.pressures.size;
+  const rate = median(S.rates);
+  document.getElementById('sum').innerHTML =
+    row(0, '来た種類', Object.entries(S.types).map(([k, v]) => `${k}:${v}`).join(' ') || '-') +
+    row(0, '筆圧の段階数(観測)', pens + (pens > 200 ? '（十分細かい）' : pens ? '' : '（まだ描いてない）'), pens > 200 ? 'ok' : pens && pens < 20 ? 'ng' : '') +
+    row(0, '筆圧 最小(>0) / 最大', `${S.minPressureNZ === 1 ? '-' : S.minPressureNZ.toFixed(4)} / ${S.maxPressure.toFixed(4)}`) +
+    row(0, '押した瞬間の筆圧(中央値)', S.downPressure.length ? median(S.downPressure).toFixed(3) : '-') +
+    row(0, '傾き', S.tilt ? 'あり' : 'なし/未検出', S.tilt ? 'ok' : '') +
+    row(0, 'twist(回転)', S.twist ? 'あり' : 'なし/未検出') +
+    row(0, 'ホバー検出', S.hover ? 'あり（ペンを浮かせて動きが来る）' : 'なし/未検出', S.hover ? 'ok' : '') +
+    row(0, 'button 値', [...S.buttonSeen].join(', ') || '-') +
+    row(0, 'buttons 値', [...S.buttonsSeen].join(', ') || '-') +
+    row(0, '右クリックメニュー発生', S.contextmenu) +
+    row(0, 'move の間隔(中央値)', rate ? `${rate.toFixed(1)}ms（約${Math.round(1000 / rate)}Hz）` : '-') +
+    row(0, 'coalesced', `${S.coalescedSupported ? '対応' : '非対応'} / 平均 ${(S.coalesced / Math.max(1, S.events)).toFixed(2)}個`) +
+    row(0, 'predicted', `${S.predictedSupported ? '対応' : '非対応'} / 平均 ${(S.predicted / Math.max(1, S.events)).toFixed(2)}個`) +
+    row(0, 'width×height(接触径)', [...S.widthHeight].slice(0, 6).join(' ') || '-');
+  drawHist();
+}
+function drawHist() {
+  const c = document.getElementById('hist'), x = c.getContext('2d');
+  x.clearRect(0, 0, c.width, c.height);
+  const bins = new Array(100).fill(0);
+  for (const [p, n] of S.pressures) bins[Math.min(99, Math.floor(p * 100))] += n;
+  const m = Math.max(1, ...bins);
+  x.fillStyle = '#4a90d9';
+  bins.forEach((n, i) => { const h = (n / m) * (c.height - 4); x.fillRect(i * 6, c.height - h, 5, h); });
+}
+function env() {
+  const t = (() => { const cv = document.createElement('canvas'); const c = cv.getContext('2d', { desynchronized: true }); return c?.getContextAttributes?.().desynchronized; })();
+  let maxCanvas = '-';
+  for (const s of [16384, 12000, 8192, 4096]) {
+    try { const cv = document.createElement('canvas'); cv.width = s; cv.height = s; const c = cv.getContext('2d'); c.fillRect(s - 1, s - 1, 1, 1); if (c.getImageData(s - 1, s - 1, 1, 1).data[3]) { maxCanvas = s + '×' + s + ' 以上'; cv.width = cv.height = 0; break; } cv.width = cv.height = 0; } catch (_) {}
+  }
+  document.getElementById('env').innerHTML =
+    row(0, 'UA', navigator.userAgent) +
+    row(0, '画面', `${screen.width}×${screen.height} css / dpr ${window.devicePixelRatio}`) +
+    row(0, 'ウィンドウ', `${innerWidth}×${innerHeight}`) +
+    row(0, 'deviceMemory', navigator.deviceMemory ?? '-') +
+    row(0, 'CPUコア', navigator.hardwareConcurrency ?? '-') +
+    row(0, 'desynchronized', t ? '有効' : '無効/非対応', t ? 'ok' : 'ng') +
+    row(0, 'canvas 最大(簡易)', maxCanvas) +
+    row(0, 'maxTouchPoints', navigator.maxTouchPoints);
+}
+env();
+
+function onDown(e) {
+  S.types[e.pointerType] = (S.types[e.pointerType] || 0) + 1;
+  S.buttonSeen.add(e.button); S.buttonsSeen.add(e.buttons);
+  if (e.pointerType === 'pen') S.downPressure.push(e.pressure);
+  pad.setPointerCapture(e.pointerId);
+  lastPt = [e.offsetX, e.offsetY, e.pressure];
+  showNow(e, 0, 0); showSum();
+}
+function record(ev) {
+  if (ev.pointerType !== 'pen') return;
+  if (ev.buttons) {
+    const p = Math.round(ev.pressure * 10000) / 10000;
+    S.pressures.set(p, (S.pressures.get(p) || 0) + 1);
+    if (p > S.maxPressure) S.maxPressure = p;
+    if (p > 0 && p < S.minPressureNZ) S.minPressureNZ = p;
+  }
+  if (ev.tiltX || ev.tiltY) S.tilt = true;
+  if (ev.twist) S.twist = true;
+  S.widthHeight.add(`${ev.width.toFixed(0)}×${ev.height.toFixed(0)}`);
+}
+function onMove(e) {
+  const co = e.getCoalescedEvents?.() || [];
+  const pr = e.getPredictedEvents?.() || [];
+  S.buttonsSeen.add(e.buttons);
+  if (e.pointerType === 'pen' && !e.buttons) S.hover = true;
+  const t = e.timeStamp;
+  if (e.buttons && lastMove) { const d = t - lastMove; if (d > 0 && d < 100) { S.rates.push(d); if (S.rates.length > 400) S.rates.shift(); } }
+  lastMove = e.buttons ? t : 0;
+  if (e.buttons) { S.events++; S.coalesced += co.length; S.predicted += pr.length; }
+  for (const ev of co.length ? co : [e]) {
+    record(ev);
+    if (e.buttons && lastPt) {
+      const r = e.pointerType === 'pen' ? 0.5 + ev.pressure * 8 : 2;
+      bctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      bctx.strokeStyle = e.buttons & 32 ? '#d64545' : e.buttons & 2 ? '#e08a1e' : '#1f2328';
+      bctx.lineCap = 'round';
+      bctx.lineWidth = r;
+      bctx.beginPath(); bctx.moveTo(lastPt[0], lastPt[1]); bctx.lineTo(ev.offsetX, ev.offsetY); bctx.stroke();
+      lastPt = [ev.offsetX, ev.offsetY, ev.pressure];
+    }
+  }
+  // 予測点は薄い線で(低遅延キャンバス)
+  fctx.setTransform(1, 0, 0, 1, 0, 0);
+  fctx.clearRect(0, 0, fast.width, fast.height);
+  if (e.buttons && pr.length && lastPt) {
+    fctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    fctx.strokeStyle = 'rgba(74,144,217,0.7)'; fctx.lineWidth = 3; fctx.lineCap = 'round';
+    fctx.beginPath(); fctx.moveTo(lastPt[0], lastPt[1]);
+    for (const p of pr) fctx.lineTo(p.offsetX, p.offsetY);
+    fctx.stroke();
+  }
+  showNow(e, co.length, pr.length);
+  if (S.events % 10 === 0) showSum();
+}
+function onUp(e) { lastPt = null; lastMove = 0; showNow(e, 0, 0); showSum(); fctx.clearRect(0, 0, fast.width, fast.height); }
+pad.addEventListener('pointerdown', onDown);
+pad.addEventListener('pointermove', onMove);
+pad.addEventListener('pointerup', onUp);
+pad.addEventListener('pointercancel', onUp);
+pad.addEventListener('contextmenu', (e) => { e.preventDefault(); S.contextmenu++; showSum(); });
+document.getElementById('clear').onclick = () => { bctx.setTransform(1, 0, 0, 1, 0, 0); bctx.clearRect(0, 0, base.width, base.height); };
+document.getElementById('copy').onclick = async () => {
+  const txt = ['now', 'sum', 'env'].map((id) => [...document.getElementById(id).rows].map((r) => r.cells[0].textContent + ': ' + r.cells[1].textContent).join('\n')).join('\n---\n');
+  try { await navigator.clipboard.writeText(txt); alert('コピーした'); }
+  catch (_) { prompt('コピーして', txt); }
+};
+showSum();
+</script>
+</body>
+</html>

@@ -1,0 +1,150 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<meta name="theme-color" content="#f3f2ee">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="ネームビルダー">
+<link rel="icon" type="image/svg+xml" href="icon.svg">
+<link rel="apple-touch-icon" href="apple-touch-icon.png">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="stylesheet" href="css/app.css">
+<title>ネームビルダー</title>
+</head>
+<body>
+
+<!-- ============ 作品一覧 ============ -->
+<section id="listScreen" class="screen">
+  <header class="bar">
+    <h1 class="app-title">ネームビルダー</h1>
+    <span class="grow"></span>
+    <button id="listSettingsBtn" class="ibtn" type="button" title="設定">⚙</button>
+  </header>
+  <main class="list-main">
+    <button id="newDocBtn" class="new-doc" type="button">＋ 新しいネーム</button>
+    <ul id="docList" class="doc-list"></ul>
+    <p id="emptyMsg" class="empty" hidden>まだ作品がない。「＋ 新しいネーム」から始めよう。</p>
+  </main>
+</section>
+
+<!-- ============ 編集画面 ============ -->
+<section id="editor" class="screen" hidden>
+  <div id="stage">
+    <canvas id="view"></canvas>
+    <canvas id="live"></canvas>
+  </div>
+
+  <header class="bar topbar">
+    <button id="backBtn" class="ibtn" type="button" title="一覧へ戻る">‹</button>
+    <span id="docTitle" class="doc-title"></span>
+    <span class="grow"></span>
+    <button id="undoBtn" class="ibtn" type="button" title="元に戻す (Ctrl+Z)" disabled>↶</button>
+    <button id="redoBtn" class="ibtn" type="button" title="やり直す (Ctrl+Shift+Z)" disabled>↷</button>
+    <button id="pageBtn" class="pill" type="button" title="ページ一覧"><span id="pageNo">1 / 1</span></button>
+    <button id="exportBtn" class="ibtn" type="button" title="PNG書き出し">⤓</button>
+    <button id="settingsBtn" class="ibtn" type="button" title="設定">⚙</button>
+  </header>
+
+  <nav id="dock" class="dock">
+    <div id="penSlots"></div>
+    <button id="eraserBtn" class="tool" type="button" title="消しゴム (E)"><span class="eraser-ico"></span></button>
+    <button id="addPageBtn" class="tool small" type="button" title="このページの後ろにページを追加">＋頁</button>
+  </nav>
+
+  <button id="zoomPill" class="pill zoom-pill" type="button" title="タップでページ全体表示">100%</button>
+  <div id="toast" class="toast" hidden></div>
+</section>
+
+<!-- ============ ペン設定 ============ -->
+<dialog id="penDlg" class="pop">
+  <h2>ペン</h2>
+  <div class="swatches" id="penColors"></div>
+  <label class="row">色を指定 <input id="penColorInput" type="color"></label>
+  <label class="row col">太さ <span><output id="penWidthOut"></output> px</span>
+    <input id="penWidth" type="range" min="1" max="120" step="1"></label>
+  <label class="row"><input id="penPressure" type="checkbox"> 筆圧で太さを変える</label>
+  <canvas id="penPreview" class="preview" width="560" height="120"></canvas>
+  <div class="actions"><button class="btn" value="close" type="button" data-close>閉じる</button></div>
+</dialog>
+
+<!-- ============ 消しゴム設定 ============ -->
+<dialog id="eraserDlg" class="pop">
+  <h2>消しゴム</h2>
+  <div class="seg">
+    <label><input type="radio" name="eraserMode" value="part"> 部分</label>
+    <label><input type="radio" name="eraserMode" value="stroke"> 線ごと</label>
+  </div>
+  <label class="row col">大きさ <span><output id="eraserSizeOut"></output> px</span>
+    <input id="eraserSize" type="range" min="6" max="300" step="2"></label>
+  <div class="actions"><button class="btn" type="button" data-close>閉じる</button></div>
+</dialog>
+
+<!-- ============ ページ一覧 ============ -->
+<dialog id="pagesDlg" class="sheet">
+  <header class="sheet-head">
+    <h2>ページ</h2>
+    <span class="grow"></span>
+    <button class="btn" type="button" data-close>閉じる</button>
+  </header>
+  <div id="pageGrid" class="page-grid"></div>
+  <footer class="sheet-foot">
+    <span id="pageSelInfo" class="muted"></span>
+    <span class="grow"></span>
+    <button id="pgMoveL" class="btn" type="button" title="前へ移動">◀</button>
+    <button id="pgMoveR" class="btn" type="button" title="後ろへ移動">▶</button>
+    <button id="pgInsBefore" class="btn" type="button">前に追加</button>
+    <button id="pgInsAfter" class="btn" type="button">後に追加</button>
+    <button id="pgDup" class="btn" type="button">複製</button>
+    <button id="pgDel" class="btn danger" type="button">削除</button>
+  </footer>
+</dialog>
+
+<!-- ============ 書き出し ============ -->
+<dialog id="exportDlg" class="pop">
+  <h2>PNGで書き出し</h2>
+  <p class="muted small">2508×3541px・350dpi（B5実寸）。クリスタの［ファイル］→［読み込み］→［画像］でそのままレイヤとして置ける。</p>
+  <div class="seg">
+    <label><input type="radio" name="exRange" value="current" checked> このページ</label>
+    <label><input type="radio" name="exRange" value="all"> 全ページ</label>
+    <label><input type="radio" name="exRange" value="range"> 範囲</label>
+  </div>
+  <div id="exRangeRow" class="row" hidden>
+    <input id="exFrom" type="number" min="1" class="num"> 〜 <input id="exTo" type="number" min="1" class="num"> ページ
+  </div>
+  <div class="seg">
+    <label><input type="radio" name="exBg" value="white" checked> 背景 白</label>
+    <label><input type="radio" name="exBg" value="clear"> 背景 透明</label>
+  </div>
+  <p class="muted small">複数ページはZIPにまとめる。</p>
+  <p id="exStatus" class="muted small"></p>
+  <div class="actions">
+    <button class="btn" type="button" data-close>キャンセル</button>
+    <button id="exShare" class="btn" type="button" hidden>共有…</button>
+    <button id="exGo" class="btn primary" type="button">保存</button>
+  </div>
+</dialog>
+
+<!-- ============ 設定 ============ -->
+<dialog id="settingsDlg" class="pop wide">
+  <h2>設定</h2>
+  <label class="row col">手ブレ補正 <span><output id="stabOut"></output></span>
+    <input id="stab" type="range" min="0" max="0.9" step="0.05"></label>
+  <label class="row col">筆圧カーブ <span class="muted small">左ほど軽い力で太くなる</span> <span><output id="gammaOut"></output></span>
+    <input id="gamma" type="range" min="0.4" max="2.5" step="0.05"></label>
+  <label class="row"><input id="sideEraser" type="checkbox"> ペンのサイドボタンを押している間は消しゴム</label>
+  <label class="row"><input id="fingerDraw" type="checkbox"> 指でも描く（オフ: 指はスクロール・ズーム専用）</label>
+  <label class="row"><input id="tapUndo" type="checkbox"> 2本指タップで元に戻す / 3本指タップでやり直す</label>
+  <div class="seg">
+    <span class="muted">道具の位置</span>
+    <label><input type="radio" name="dockSide" value="left"> 左</label>
+    <label><input type="radio" name="dockSide" value="right"> 右</label>
+  </div>
+  <p class="muted small" id="persistInfo"></p>
+  <p class="small"><a href="probe.html" target="_blank" rel="noopener">ペン入力の診断ページ</a>（筆圧・傾き・ボタン・遅延の確認）</p>
+  <div class="actions"><button class="btn" type="button" data-close>閉じる</button></div>
+</dialog>
+
+<script type="module" src="js/app.js"></script>
+</body>
+</html>
