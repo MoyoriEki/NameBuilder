@@ -12,18 +12,21 @@
    - 競合(同じ作品を両方の端末で変えた): どちらも捨てない。
      Dropbox側の版を「（別端末の版）」として別作品に取り込み、こちらの版で上書きする
    ============================================================ */
-import * as db from './db.js?v=9';
+import * as db from './db.js?v=10';
 
 const BASE = '/NameBuilder';
 const PREFIX = 'namebuilder';
 const TOMB_KEY = 'nb_tombstones';   // 削除したがDropboxからまだ消せていない作品ID
 // 同じオリジン(moyorieki.github.io)のほかのアプリが localStorage に持っているDropbox接続。
-// これを借りれば、ネームビルダー用に Redirect URI を登録しなくても繋がる
+// これを借りれば、ネームビルダー用に Redirect URI を登録しなくても繋がる。
+// プロットボードと Fileviewer は storage-bridge 経由(同じ形式)。ムーンライター(MDEditer)は
+// 自前の接続で、別のDropboxアプリを使っていることがある(App folder型だと保存先がそのアプリのフォルダ内になる)ので最後の候補にする
 const BORROW_SOURCES = [
   { prefix: 'plotboard', name: 'プロットボード' },
   { prefix: 'dbxfiler', name: 'Fileviewer' },
-  { prefix: 'mdapp', name: 'MDエディタ' },
+  { prefix: 'mdapp', name: 'ムーンライター', note: '自前で接続しているアプリ。別のDropboxアプリだと保存場所がそのアプリ用のフォルダ（/アプリ/…/NameBuilder）になることがある' },
 ];
+const BORROWED_KEY = 'nb_dbx_borrowed'; // どのアプリの接続を借りたか(表示用)
 
 let storage = null;
 let hooks = null;
@@ -153,10 +156,14 @@ export function borrowFrom(prefix) {
     if (v) localStorage.setItem(`${PREFIX}_dbx_${k}`, v);
   }
   localStorage.removeItem(`${PREFIX}_dbx_reauth`);
+  const src = BORROW_SOURCES.find((b) => b.prefix === prefix);
+  if (src) localStorage.setItem(BORROWED_KEY, src.name);
   location.reload(); // ブリッジは起動時に保存済みトークンから接続し直す
 }
 export function connect() { storage?._ui?._onBtnClick ? storage._ui._onBtnClick() : storage?.connect(); }
-export function disconnect() { storage?.disconnect(); }
+export function disconnect() { localStorage.removeItem(BORROWED_KEY); storage?.disconnect(); }
+/** 借りた接続ならその元のアプリ名 */
+export const borrowedFrom = () => (connected() ? localStorage.getItem(BORROWED_KEY) : null);
 
 /* ---------------- 内部 ---------------- */
 /** 進み具合だけ変える(ランプの「取り込み中/アップロード中」用) */
