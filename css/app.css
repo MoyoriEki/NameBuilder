@@ -226,8 +226,6 @@ input[type=checkbox], input[type=radio] { width: 18px; height: 18px; accent-colo
 @keyframes lampblink { 50% { opacity: 0.25; } }
 .sync-head { display: flex; align-items: center; gap: 8px; font-size: 15px; font-weight: 600; }
 .sync-head .lamp { width: 12px; height: 12px; }
-.borrow-list { display: flex; flex-direction: column; gap: 6px; }
-.borrow-list:empty { display: none; }
 #syncHint code { font-size: 12px; user-select: all; -webkit-user-select: all; }
 #syncDetail { white-space: pre-wrap; word-break: break-all; }
 #editor.vbar .sync-lamp.compact { margin: 2px 0; }

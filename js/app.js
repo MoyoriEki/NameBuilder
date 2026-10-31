@@ -6,10 +6,10 @@
    - 描画中の線だけは重ねキャンバス(#live)に描き、
      ペンを離したらページのキャッシュへ焼き込む
    ============================================================ */
-import * as db from './db.js?v=10';
-import { drawStroke, drawLiveStroke, isOpacityStroke, bbox, bboxHit, hitStroke, eraseSplit, sweep } from './ink.js?v=10';
-import { pngWithDpi, makeZip } from './zip.js?v=10';
-import * as cloud from './cloud.js?v=10';
+import * as db from './db.js?v=11';
+import { drawStroke, drawLiveStroke, isOpacityStroke, bbox, bboxHit, hitStroke, eraseSplit, sweep } from './ink.js?v=11';
+import { pngWithDpi, makeZip } from './zip.js?v=11';
+import * as cloud from './cloud.js?v=11';
 
 const PAGE_W = 2508, PAGE_H = 3541, DPI = 350;
 const GAP = 140;                 // ページ間の隙間(page-px)
@@ -1792,28 +1792,11 @@ async function updateSyncUI() {
   $('syncDlgLamp').className = 'lamp ' + cls;
   $('syncState').textContent = text;
   const lines = [];
-  if (cloud.borrowedFrom()) lines.push(`接続: ${cloud.borrowedFrom()}の接続を使用中`);
   if (st.connected && st.lastSyncAt) lines.push('最後に同期: ' + new Date(st.lastSyncAt).toLocaleTimeString('ja-JP'));
   if (st.connected && cls === 'pending') lines.push('描いてから20秒ほどで自動で上がる。すぐ上げたいときは「今すぐ同期」');
   if (st.state === 'error' && st.error) lines.push('内容: ' + st.error);
   if (!st.available) lines.push('通信できないか、storage-bridge が読み込めなかった。つながる所で開き直すと使える');
   $('syncDetail').textContent = lines.join('\n');
-  const box = $('syncBorrow');
-  box.innerHTML = '';
-  for (const src of st.borrow || []) {
-    const b = document.createElement('button');
-    b.type = 'button';
-    b.className = 'btn';
-    b.textContent = `${src.name}のDropbox接続を使う`;
-    b.addEventListener('click', () => cloud.borrowFrom(src.prefix));
-    box.appendChild(b);
-    if (src.note) {
-      const n = document.createElement('p');
-      n.className = 'muted small';
-      n.textContent = '※ ' + src.note;
-      box.appendChild(n);
-    }
-  }
   $('syncHint').hidden = st.connected || !st.available;
   $('syncConnect').hidden = st.connected || !st.available;
   $('syncDisconnect').hidden = !st.connected;

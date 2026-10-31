@@ -28,9 +28,7 @@
 
 [storage-bridge](https://github.com/MoyoriEki/storage-bridge) を無改造で使う（`js/cloud.js`）。ローカル（IndexedDB）が常に一次ストレージで、Dropboxはバックアップ兼ほかの端末との受け渡し。未接続・オフラインでも全機能が使える。
 
-- **つなぎ方**: 同期ランプ（一覧の右上・編集画面のバー）をタップして開く「Dropbox同期」から。
-  - **「〇〇のDropbox接続を使う」**: 同じオリジン（moyorieki.github.io）のほかのアプリ（プロットボード=`plotboard_`、Fileviewer=`dbxfiler_`、ムーンライター=`mdapp_`）が localStorage に持っている接続情報（App key・トークン）をコピーして、そのまま接続する。再認証もRedirect URIの登録も要らない。プロットボードとFileviewerはstorage-bridge経由で同じ形式。ムーンライター（MDEditerリポジトリ）は自前で接続していて、別のDropboxアプリだと保存場所がそのアプリ用のフォルダになることがあるので、最後の候補にして注意書きを出す。借りた元は `nb_dbx_borrowed` に覚えて同期ダイアログに表示する
-  - **「Dropbox 接続」**: 通常の認証。Dropboxのアプリ設定（App Console → Settings → OAuth 2 → Redirect URIs）に **`https://moyorieki.github.io/NameBuilder/`** を登録しておくこと。`…/index.html` で開かれても起動時に `…/` へ直すので、登録はこの1つでよい
+- **つなぎ方**: 同期ランプ（一覧の右上・編集画面のバー）をタップして開く「Dropbox同期」の「Dropbox 接続」から。プロットボード・Fileviewerと同じ storage-bridge の認証。Dropboxのアプリ設定（App Console → Settings → OAuth 2 → Redirect URIs）に **`https://moyorieki.github.io/NameBuilder/`** を登録しておくこと。`…/index.html` で開かれても起動時に `…/` へ直すので、登録はこの1つでよい
 - **同期ランプ**: 緑=同期済み／黄=未同期（描いてから約20秒で自動で上がる）／青の点滅=アップロード中／水色の点滅=取り込み中／赤=エラー／灰=オフライン／白抜き=未接続。タップで詳しい状態（最後に同期した時刻・エラー内容）と「今すぐ同期」「切断」。storage-bridge の標準の接続UIは隠し、App key入力のモーダルだけ使う
 - **配置**（`/NameBuilder` 以下）: `{作品ID}/doc.json`（タイトル・ページの並び）、`{作品ID}/pages/{ページID}.nbp`（線データ）、`_deleted/{作品ID}`（削除の目印）。フォルダ名は作品IDなので、名前を変えても移動は要らない
 - **ページ単位で上げる**: 作品ごとに `doc.sync = { docRev, pageRev, dirtyPages, docDirty, seq }` を持ち、描いたページだけを上げる。`seq` は「上げている最中に描き足されたか」を見分ける番号で、描き足されたページは未同期のまま残って次の同期で上がる
@@ -83,5 +81,5 @@
 | 1.5 | ページ送り表示（右開き/左開き）、ページ番号をメニューバーへ、縦バー（横向きタブレット用）、筆圧の上限 | 完了 |
 | 1.6 | Chromeで真っ黒になる問題の修正（低遅延描画は設定で選ぶ実験機能に）、筆圧で濃さを変えるペン、透明背景の書き出しを白→透明変換に | 完了 |
 | 2 | 投げ縄で選択して移動・拡大縮小、仕上がり枠・基本枠のガイド表示、ペンの描き味調整（実機の計測結果を見て） | 未着手 |
-| 3 | Dropbox同期（[storage-bridge](https://github.com/MoyoriEki/storage-bridge)・ページ単位のファイル・競合時は両方残す・プロットボードの接続を流用） | 完了 |
+| 3 | Dropbox同期（[storage-bridge](https://github.com/MoyoriEki/storage-bridge)・ページ単位のファイル・競合時は両方残す） | 完了 |
 | 後で | 見開き表示、コマ割りツール、テキストのセリフ、プロットボードとの連携、レイヤ付きPSD | 未定 |

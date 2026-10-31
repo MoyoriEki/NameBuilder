@@ -19,7 +19,7 @@
 <!-- Dropbox連携の共通ライブラリ(無改造で利用)。読み込めなければローカルのみで動く -->
 <link rel="stylesheet" href="https://moyorieki.github.io/storage-bridge/storage-bridge.css">
 <script src="https://moyorieki.github.io/storage-bridge/storage-bridge.js"></script>
-<link rel="stylesheet" href="css/app.css?v=10">
+<link rel="stylesheet" href="css/app.css?v=11">
 <title>ネームビルダー</title>
 </head>
 <body>
@@ -151,8 +151,7 @@
   <h2>Dropbox同期</h2>
   <p class="sync-head"><span id="syncDlgLamp" class="lamp off"></span><span id="syncState"></span></p>
   <p id="syncDetail" class="muted small"></p>
-  <div id="syncBorrow" class="borrow-list"></div>
-  <p id="syncHint" class="muted small">「Dropbox 接続」でつなぐ場合は、先にDropboxのアプリ設定（<a href="https://www.dropbox.com/developers/apps" target="_blank" rel="noopener">App Console</a> → 使っているアプリ → Settings → OAuth 2 → Redirect URIs）に<br><code>https://moyorieki.github.io/NameBuilder/</code><br>を追加しておくこと。上のボタンでほかのアプリの接続を借りるなら登録は要らない。</p>
+  <p id="syncHint" class="muted small">「Dropbox 接続」でつなぐ場合は、先にDropboxのアプリ設定（<a href="https://www.dropbox.com/developers/apps" target="_blank" rel="noopener">App Console</a> → 使っているアプリ → Settings → OAuth 2 → Redirect URIs）に<br><code>https://moyorieki.github.io/NameBuilder/</code><br>を追加しておくこと（プロットボードなどと同じく、アプリごとに一度だけ必要）。</p>
   <div class="actions">
     <button id="syncDisconnect" class="btn danger" type="button">切断</button>
     <span class="grow"></span>
@@ -233,6 +232,6 @@
 </script>
 <!-- 版番号(?v=)は css/js を変えるたびに index.html と js/app.js の両方で上げる。
      新旧のファイルが混ざって読み込みに失敗するのを防ぐため -->
-<script type="module" src="js/app.js?v=10"></script>
+<script type="module" src="js/app.js?v=11"></script>
 </body>
 </html>
