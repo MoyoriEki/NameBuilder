@@ -9,7 +9,17 @@
 <link rel="icon" type="image/svg+xml" href="icon.svg">
 <link rel="apple-touch-icon" href="apple-touch-icon.png">
 <link rel="manifest" href="manifest.webmanifest">
-<link rel="stylesheet" href="css/app.css?v=7">
+<script>
+  // Dropbox認証の戻り先URLを1つに揃える(…/index.html で開かれても …/ に直す)。
+  // Dropboxのアプリ設定に登録する Redirect URI は https://moyorieki.github.io/NameBuilder/ だけでよくなる
+  if (location.pathname.endsWith('/index.html')) {
+    history.replaceState(history.state, '', location.pathname.slice(0, -'index.html'.length) + location.search + location.hash);
+  }
+</script>
+<!-- Dropbox連携の共通ライブラリ(無改造で利用)。読み込めなければローカルのみで動く -->
+<link rel="stylesheet" href="https://moyorieki.github.io/storage-bridge/storage-bridge.css">
+<script src="https://moyorieki.github.io/storage-bridge/storage-bridge.js"></script>
+<link rel="stylesheet" href="css/app.css?v=8">
 <title>ネームビルダー</title>
 </head>
 <body>
@@ -19,6 +29,10 @@
   <header class="bar">
     <h1 class="app-title">ネームビルダー</h1>
     <span class="grow"></span>
+    <span id="syncInfo" class="sync-info"></span>
+    <button id="syncBtn" class="ibtn" type="button" title="今すぐ同期" hidden>⟳</button>
+    <button id="borrowBtn" class="btn" type="button" hidden title="同じオリジンのプロットボードに保存されたDropbox接続をそのまま使う">プロットボードの接続を使う</button>
+    <div id="dbxMount" class="dbx-mount"></div>
     <button id="listSettingsBtn" class="ibtn" type="button" title="設定">⚙</button>
   </header>
   <main class="list-main">
@@ -38,6 +52,7 @@
   <header id="topbar" class="bar topbar">
     <button id="backBtn" class="ibtn" type="button" title="一覧へ戻る">‹</button>
     <span id="docTitle" class="doc-title"></span>
+    <span id="syncDot" class="sync-dot off"></span>
     <span class="grow"></span>
     <button id="undoBtn" class="ibtn" type="button" title="元に戻す (Ctrl+Z)" disabled>↶</button>
     <button id="redoBtn" class="ibtn" type="button" title="やり直す (Ctrl+Shift+Z)" disabled>↷</button>
@@ -204,6 +219,6 @@
 </script>
 <!-- 版番号(?v=)は css/js を変えるたびに index.html と js/app.js の両方で上げる。
      新旧のファイルが混ざって読み込みに失敗するのを防ぐため -->
-<script type="module" src="js/app.js?v=7"></script>
+<script type="module" src="js/app.js?v=8"></script>
 </body>
 </html>

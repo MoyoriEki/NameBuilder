@@ -6,9 +6,10 @@
    - 描画中の線だけは重ねキャンバス(#live)に描き、
      ペンを離したらページのキャッシュへ焼き込む
    ============================================================ */
-import * as db from './db.js?v=7';
-import { drawStroke, drawLiveStroke, isOpacityStroke, bbox, bboxHit, hitStroke, eraseSplit, sweep } from './ink.js?v=7';
-import { pngWithDpi, makeZip } from './zip.js?v=7';
+import * as db from './db.js?v=8';
+import { drawStroke, drawLiveStroke, isOpacityStroke, bbox, bboxHit, hitStroke, eraseSplit, sweep } from './ink.js?v=8';
+import { pngWithDpi, makeZip } from './zip.js?v=8';
+import * as cloud from './cloud.js?v=8';
 
 const PAGE_W = 2508, PAGE_H = 3541, DPI = 350;
 const GAP = 140;                 // ページ間の隙間(page-px)
@@ -603,6 +604,7 @@ function markDirty(pageId) {
 }
 function markDocDirty() {
   E.docDirty = true;
+  E.syncDocDirty = true; // ページの並びなど、Dropboxにも伝える変更
   scheduleSave();
 }
 function scheduleSave() {
@@ -616,9 +618,15 @@ async function flushSave() {
   if (st.saving) await st.saving;
   if (!st.dirty.size && !st.docDirty) return;
   const ids = [...st.dirty].filter((id) => st.doc.pages.includes(id));
+  const contentChanged = ids.length > 0 || st.syncDocDirty;
   st.dirty.clear();
   st.docDirty = false;
-  st.doc.updatedAt = new Date().toISOString();
+  // 表示位置(lastPage)だけの保存では更新日時もDropboxも触らない
+  if (contentChanged) {
+    st.doc.updatedAt = new Date().toISOString();
+    cloud.noteLocalChange(st.doc, ids, !!st.syncDocDirty);
+    st.syncDocDirty = false;
+  }
   const recs = [], thumbs = [];
   for (const id of ids) {
     const ps = st.pages.get(id);
@@ -634,6 +642,7 @@ async function flushSave() {
     })
     .finally(() => { st.saving = null; });
   await st.saving;
+  if (contentChanged) cloud.syncSoon();
 }
 
 const THUMB_W = 200, THUMB_H = Math.round((THUMB_W * PAGE_H) / PAGE_W);
@@ -1634,6 +1643,7 @@ $('newDocBtn').addEventListener('click', async () => {
   if (title === null) return;
   const t = new Date().toISOString();
   const doc = { id: uid('doc'), title: title.trim() || defaultTitle(), createdAt: t, updatedAt: t, w: PAGE_W, h: PAGE_H, pages: [uid('pg')] };
+  cloud.noteLocalChange(doc, doc.pages, true);
   await db.putDoc(doc);
   db.requestPersist();
   openDoc(doc.id);
@@ -1642,18 +1652,24 @@ async function renameDoc(doc) {
   const t = prompt('作品名', doc.title);
   if (t === null || !t.trim()) return;
   doc.title = t.trim();
+  doc.updatedAt = new Date().toISOString();
+  cloud.noteLocalChange(doc, [], true);
   await db.putDoc(doc);
   renderList();
+  cloud.syncSoon(1000);
 }
 async function dupDoc(doc) {
   const t = new Date().toISOString();
   const nd = { ...doc, id: uid('doc'), title: doc.title + ' のコピー', createdAt: t, updatedAt: t, pages: doc.pages.slice() };
+  cloud.resetSync(nd);
   await db.duplicateDoc(doc, nd);
   renderList();
+  cloud.syncSoon(1000);
 }
 async function removeDoc(doc) {
   if (!confirm(`「${doc.title}」を削除する？（元に戻せない）`)) return;
   await db.deleteDoc(doc.id);
+  cloud.forgetDoc(doc);
   renderList();
 }
 
@@ -1686,6 +1702,11 @@ async function closeDoc() {
   E.doc.lastPage = currentPage();
   E.docDirty = true;
   await flushSave();
+  discardEditor();
+  cloud.syncNow();
+}
+/** 編集画面を保存せずに閉じる(Dropboxの版に差し替わったとき用。closeDoc からも使う) */
+function discardEditor() {
   for (const c of caches.values()) c.canvas.width = c.canvas.height = 0;
   caches.clear();
   E = null;
@@ -1711,15 +1732,62 @@ window.addEventListener('popstate', () => {
 $('zoomPill').addEventListener('click', () => showPage(currentPage()));
 
 document.addEventListener('visibilitychange', () => {
-  if (document.visibilityState === 'hidden' && E) {
-    E.doc.lastPage = currentPage();
-    E.docDirty = true;
-    flushSave();
+  if (document.visibilityState === 'hidden') {
+    // 裏に回る(アプリ切り替え・画面オフ)ときは保存してすぐDropboxへ
+    if (E) {
+      E.doc.lastPage = currentPage();
+      E.docDirty = true;
+      flushSave().then(() => cloud.syncNow());
+    } else cloud.syncNow();
+  } else {
+    cloud.syncNow(); // 戻ってきたら、ほかの端末の変更を取り込む
   }
 });
 window.addEventListener('pagehide', () => { if (E) flushSave(); });
 new ResizeObserver(() => resize()).observe(stage);
 window.addEventListener('resize', () => resize());
+
+/* ============================================================
+   Dropbox同期の表示
+   ============================================================ */
+cloud.initCloud({
+  openDoc: () => E?.doc || null,
+  openStrokes: (doc, pid) => (E && E.doc === doc ? E.pages.get(pid)?.strokes || null : null),
+  canReplaceOpen: () => !!E && !E.dirty.size && !E.docDirty && !E.saving && !drawing && !erasing,
+  replacedOpen: (docId) => {
+    if (!E || E.doc.id !== docId) return;
+    const page = currentPage();
+    discardEditor();
+    openDoc(docId).then(() => { if (E) { showPage(page); toast('ほかの端末の変更を取り込んだ'); } });
+  },
+  makeThumb: (strokes) => makeThumb(null, { strokes }),
+  changed: () => { if (!E) renderList(); updateSyncUI(); },
+});
+let lastCloud = cloud.status();
+cloud.onStatus((st) => { lastCloud = st; updateSyncUI(); });
+async function updateSyncUI() {
+  const st = lastCloud;
+  const info = $('syncInfo'), dot = $('syncDot');
+  $('borrowBtn').hidden = !st.canBorrow;
+  $('syncBtn').hidden = !st.connected;
+  let text = '', cls = '';
+  if (!st.available) { text = 'Dropbox連携を読み込めなかった（オフライン？）'; cls = 'off'; }
+  else if (!st.connected) { text = ''; cls = 'off'; }
+  else if (st.state === 'syncing') { text = '同期中…'; cls = 'busy'; }
+  else if (st.state === 'offline') { text = 'オフライン（つながったら同期）'; cls = 'pending'; }
+  else if (st.state === 'error') { text = '同期に失敗した'; cls = 'error'; }
+  else {
+    const n = (await db.listDocs()).filter((d) => cloud.isDirty(d)).length;
+    text = n ? `未同期 ${n}件` : '同期済み';
+    cls = n ? 'pending' : 'ok';
+  }
+  info.textContent = text;
+  info.title = st.error || '';
+  dot.className = 'sync-dot ' + cls;
+  dot.title = text || 'Dropbox未接続';
+}
+$('syncBtn').addEventListener('click', () => cloud.syncNow());
+$('borrowBtn').addEventListener('click', () => cloud.borrowPlotboard());
 
 /* ---- 起動 ---- */
 renderDock();

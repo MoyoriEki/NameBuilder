@@ -203,3 +203,18 @@ input[type=checkbox], input[type=radio] { width: 18px; height: 18px; accent-colo
   width: min(420px, 92vw); padding: 20px; border-radius: 14px; background: #fff; box-shadow: var(--shadow);
   display: flex; flex-direction: column; gap: 12px; align-items: flex-start;
 }
+
+/* ---------- Dropbox同期 ---------- */
+.dbx-mount .sb-ui { gap: 8px; }
+.dbx-mount .sb-status { font-size: 12px; }
+.dbx-mount .sb-connect-btn { border-radius: 8px; padding: 6px 12px; background: #fff; }
+.sync-info { font-size: 12px; color: var(--muted); white-space: nowrap; }
+.sync-dot { width: 9px; height: 9px; border-radius: 50%; flex: none; background: #c4c9ce; }
+.sync-dot.off { display: none; }
+.sync-dot.ok { background: #2f9e5b; }
+.sync-dot.busy { background: var(--accent); animation: syncpulse 1s ease-in-out infinite; }
+.sync-dot.pending { background: #e0a21e; }
+.sync-dot.error { background: var(--danger); }
+@keyframes syncpulse { 50% { opacity: 0.3; } }
+#editor.vbar .sync-dot { margin: 4px 0; }
+@media (max-width: 640px) { .sync-info { display: none; } }
