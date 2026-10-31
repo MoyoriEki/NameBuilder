@@ -4,7 +4,7 @@
 
 - 本体: `index.html`（ノービルド・ES modules）
 - ペン入力の診断: `probe.html`
-- 公開URL（予定）: https://moyorieki.github.io/NameBuilder/ （GitHub Pages / mainへのpushで自動デプロイ）
+- 公開URL: https://moyorieki.github.io/NameBuilder/ （GitHub Pages / mainへのpushで自動デプロイ）
 
 ## 設計方針
 
