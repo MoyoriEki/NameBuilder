@@ -5,6 +5,7 @@
        {docId}/doc.json          作品の情報(タイトル・ページの並び)
        {docId}/pages/{pageId}.nbp ページの線データ(独自バイナリ・gzip)
        _deleted/{docId}          削除した作品の目印(ほかの端末に削除を伝える)
+       _devices/{deviceId}.json  端末ごとの設定(その端末だけが書く。ほかの端末から読み込める)
      フォルダ名は作品IDなので、名前を変えても移動は要らない
    - 描いたページだけを上げる(ページ単位)。作品ごとに
        doc.sync = { docRev, pageRev:{pageId:rev}, dirtyPages:{pageId:seq}, docDirty:seq, seq }
@@ -17,6 +18,9 @@ import * as db from './db.js?v=20';
 const BASE = '/NameBuilder';
 const PREFIX = 'namebuilder';
 const TOMB_KEY = 'nb_tombstones';   // 削除したがDropboxからまだ消せていない作品ID
+const DEVICE_KEY = 'nb_device';     // この端末のID・名前
+const DEV_PUSHED_KEY = 'nb_settings_pushed'; // 最後にDropboxへ上げた端末設定(JSON文字列)
+const DEV_DIR = '_devices';
 
 let storage = null;
 let hooks = null;
@@ -118,6 +122,7 @@ export function syncNow() {
         await pullAll();
         setPhase('push');
         await pushAll();
+        await pushDevice();
         lastError = '';
         lastSyncAt = Date.now();
         phase = '';
@@ -136,6 +141,121 @@ export function syncNow() {
 
 export function connect() { storage?._ui?._onBtnClick ? storage._ui._onBtnClick() : storage?.connect(); }
 export function disconnect() { storage?.disconnect(); }
+
+/* ---------------- 端末ごとの設定 ----------------
+   設定は端末(ブラウザ)ごとに localStorage に持つ。Dropboxにつながっていれば
+   _devices/{deviceId}.json にも端末ごとに保存し、ほかの端末の設定を読み込めるようにする。
+   各ファイルを書くのはその端末だけなので、競合は起きない */
+
+/** この端末のID・名前。初めて呼ばれたときに作る */
+export function device() {
+  let d = null;
+  try { d = JSON.parse(localStorage.getItem(DEVICE_KEY)); } catch (_) {}
+  if (!d || typeof d.id !== 'string' || !d.id) {
+    d = { id: uid('dev'), name: guessDeviceName() };
+    localStorage.setItem(DEVICE_KEY, JSON.stringify(d));
+  }
+  if (!d.name) d.name = guessDeviceName();
+  return d;
+}
+
+export function setDeviceName(name) {
+  const d = device();
+  d.name = String(name).trim().slice(0, 40) || guessDeviceName();
+  localStorage.setItem(DEVICE_KEY, JSON.stringify(d));
+  noteSettingsChange();
+  return d;
+}
+
+/** 設定が変わった(少し待ってからDropboxへ) */
+export function noteSettingsChange() {
+  if (!connected() || !deviceDirty()) return;
+  touch();
+  syncSoon();
+}
+
+/** この端末の設定がDropboxに上がっていないか */
+export function deviceDirty() {
+  if (!hooks?.settings) return false;
+  return localStorage.getItem(DEV_PUSHED_KEY) !== devicePayload();
+}
+
+/** Dropboxにある端末ごとの設定の一覧(新しい順)。[{ id, name, updatedAt, settings, self }] */
+export async function listDevices() {
+  if (!connected()) return [];
+  const base = storage._basePath ?? BASE;
+  let entries = [];
+  try {
+    let d = await storage._apiFetch('files/list_folder', { path: `${base}/${DEV_DIR}` });
+    entries = d.entries;
+    while (d.has_more) {
+      d = await storage._apiFetch('files/list_folder/continue', { cursor: d.cursor });
+      entries = entries.concat(d.entries);
+    }
+  } catch (e) {
+    if (isNotFound(e)) return [];
+    throw e;
+  }
+  const me = device().id;
+  const out = [];
+  for (const en of entries) {
+    if (en['.tag'] !== 'file' || !en.name.endsWith('.json')) continue;
+    try {
+      const j = JSON.parse(await storage.load(`${DEV_DIR}/${en.name}`));
+      if (!j || typeof j.settings !== 'object') continue;
+      const id = j.device?.id || en.name.slice(0, -5);
+      out.push({ id, name: j.device?.name || '名前なし', updatedAt: j.updatedAt || '', settings: j.settings, self: id === me });
+    } catch (e) {
+      console.warn('[sync] 端末の設定を読めなかった', en.name, e);
+    }
+  }
+  out.sort((a, b) => (b.updatedAt > a.updatedAt ? 1 : b.updatedAt < a.updatedAt ? -1 : 0));
+  return out;
+}
+
+/** ほかの端末の設定をDropboxから消す(もう使っていない端末の分の片付け) */
+export async function deleteDevice(id) {
+  if (!connected() || id === device().id) return;
+  try { await storage.delete(`${DEV_DIR}/${id}.json`); } catch (e) { if (!isNotFound(e)) throw e; }
+}
+
+function devicePayload() {
+  const d = device();
+  return JSON.stringify({ name: d.name, settings: hooks.settings() });
+}
+
+async function pushDevice() {
+  if (!hooks?.settings || !deviceDirty()) return;
+  const snap = devicePayload();
+  const { name, settings } = JSON.parse(snap);
+  const d = device();
+  const file = {
+    format: 'namebuilder-settings', version: 1,
+    device: { id: d.id, name, ua: navigator.userAgent },
+    updatedAt: new Date().toISOString(),
+    settings,
+  };
+  await storage.save(`${DEV_DIR}/${d.id}.json`, JSON.stringify(file, null, 1));
+  localStorage.setItem(DEV_PUSHED_KEY, snap);
+}
+
+/** 端末の名前の初期値(「Android・Chrome」など。あとで設定から変えられる) */
+function guessDeviceName() {
+  const ua = navigator.userAgent || '';
+  const os = /Android/.test(ua) ? 'Android'
+    : /iPad/.test(ua) || (/Macintosh/.test(ua) && navigator.maxTouchPoints > 1) ? 'iPad'
+    : /iPhone/.test(ua) ? 'iPhone'
+    : /Windows/.test(ua) ? 'Windows'
+    : /Macintosh/.test(ua) ? 'Mac'
+    : /CrOS/.test(ua) ? 'Chromebook'
+    : /Linux/.test(ua) ? 'Linux' : '端末';
+  const br = /Edg\//.test(ua) ? 'Edge'
+    : /SamsungBrowser/.test(ua) ? 'Samsung Internet'
+    : /Firefox\//.test(ua) ? 'Firefox'
+    : /Chrome\//.test(ua) ? 'Chrome'
+    : /Safari\//.test(ua) ? 'Safari' : '';
+  return br ? `${os}・${br}` : os;
+}
 
 /* ---------------- 内部 ---------------- */
 /** 進み具合だけ変える(ランプの「取り込み中/アップロード中」用) */
@@ -189,6 +309,7 @@ async function listRemote() {
     if (en['.tag'] !== 'file') continue;
     const rel = en.path_display.slice(base.length + 1).split('/');
     if (rel[0] === '_deleted') { if (rel[1]) out.deleted.add(rel[1]); continue; }
+    if (rel[0] === DEV_DIR) continue; // 端末ごとの設定(作品ではない)
     const docId = rel[0];
     if (!out.has(docId)) out.set(docId, { docRev: null, pages: new Map() });
     const r = out.get(docId);
