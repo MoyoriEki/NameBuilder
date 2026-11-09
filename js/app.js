@@ -6,10 +6,10 @@
    - 描画中の線だけは重ねキャンバス(#live)に描き、
      ペンを離したらページのキャッシュへ焼き込む
    ============================================================ */
-import * as db from './db.js?v=21';
-import { drawStroke, drawLiveStroke, isOpacityStroke, opacityAt, bbox, bboxHit, hitStroke, eraseSplit, sweep } from './ink.js?v=21';
-import { pngWithDpi, makeZip } from './zip.js?v=21';
-import * as cloud from './cloud.js?v=21';
+import * as db from './db.js?v=22';
+import { drawStroke, drawLiveStroke, isOpacityStroke, opacityAt, bbox, bboxHit, hitStroke, eraseSplit, sweep } from './ink.js?v=22';
+import { pngWithDpi, makeZip } from './zip.js?v=22';
+import * as cloud from './cloud.js?v=22';
 
 const PAGE_W = 2508, PAGE_H = 3541, DPI = 350;
 const GAP = 140;                 // ページ間の隙間(page-px)
@@ -1656,11 +1656,79 @@ function syncExportRange() {
   const conn = cloud.connected();
   $('exDbx').disabled = !conn;
   $('exDbxRow').hidden = !exportToDbx();
+  $('exFolderBrowse').disabled = !conn;
   $('exDbxOff').hidden = conn || !settings.exportDbx;
 }
 for (const r of document.querySelectorAll('input[name=exRange]')) r.addEventListener('change', syncExportRange);
 $('exDbx').addEventListener('change', (e) => { settings.exportDbx = e.target.checked; saveSettings(); syncExportRange(); });
 $('exZip').addEventListener('change', (e) => { settings.exportZip = e.target.checked; saveSettings(); });
+$('exFolderBrowse').addEventListener('click', async () => {
+  const f = await chooseDbxFolder($('exFolder').value);
+  if (f !== null) $('exFolder').value = f;
+});
+
+/* ---- Dropboxのフォルダ選び ----
+   中のフォルダをタップで入る、「上のフォルダへ」で戻る、「ここにする」で決定。キャンセルなら null */
+let folderCur = '';
+let folderSeq = 0;
+function chooseDbxFolder(start) {
+  const dlg = $('folderDlg');
+  dlg.returnValue = '';
+  dlg.showModal();
+  showFolder(cloud.normalizeFolder(start));
+  return new Promise((resolve) => {
+    dlg.addEventListener('close', () => resolve(dlg.returnValue === 'ok' ? folderCur : null), { once: true });
+  });
+}
+async function showFolder(dir) {
+  const seq = ++folderSeq;
+  folderCur = dir;
+  $('folderPath').textContent = 'Dropbox / ' + (dir ? dir.split('/').join(' / ') : '（トップ）');
+  const list = $('folderList'), status = $('folderStatus');
+  list.replaceChildren();
+  status.textContent = '読み込み中…';
+  $('folderOk').disabled = $('folderNew').disabled = true;
+  let names;
+  try {
+    names = await cloud.listFolders(dir);
+  } catch (err) {
+    if (seq !== folderSeq) return;
+    console.warn(err);
+    status.textContent = '読み込めなかった: ' + String(err?.message || err).slice(0, 200);
+    names = [];
+  }
+  if (seq !== folderSeq) return; // 読み込み中に別のフォルダへ移った
+  $('folderOk').disabled = false;
+  $('folderNew').disabled = names === null;
+  const item = (label, cls, go) => {
+    const li = document.createElement('li');
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = cls;
+    b.textContent = label;
+    b.addEventListener('click', go);
+    li.appendChild(b);
+    list.appendChild(li);
+  };
+  if (dir) item('↑ 上のフォルダへ', 'up', () => showFolder(dir.split('/').slice(0, -1).join('/')));
+  for (const n of names || []) item('📁 ' + n, '', () => showFolder(dir ? `${dir}/${n}` : n));
+  if (names === null) status.textContent = 'このフォルダはまだ無い（保存するときに作られる）';
+  else if (!status.textContent.startsWith('読み込めなかった')) status.textContent = names.length ? '' : '中にフォルダは無い';
+}
+$('folderOk').addEventListener('click', () => $('folderDlg').close('ok'));
+$('folderNew').addEventListener('click', async () => {
+  const name = (await askName('新しいフォルダ', '', '作成'))?.trim();
+  if (!name) return;
+  if (/[\\/]/.test(name) || name === '.' || name === '..') { toast('フォルダ名に / や \\ は使えない'); return; }
+  const dir = folderCur ? `${folderCur}/${name}` : name;
+  try {
+    await cloud.makeFolder(dir);
+    showFolder(dir);
+  } catch (err) {
+    console.warn(err);
+    $('folderStatus').textContent = 'フォルダを作れなかった: ' + String(err?.message || err).slice(0, 200);
+  }
+});
 $('exportBtn').addEventListener('click', openExportDialog);
 
 async function strokesOf(id) {
@@ -1786,6 +1854,8 @@ async function openSettings() {
   $('lowLatency').checked = settings.lowLatency;
   $('fullscreen').checked = settings.fullscreen;
   $('exportFolderDef').value = settings.exportFolder;
+  $('exportFolderBrowse').disabled = !cloud.connected();
+  $('exportFolderOff').hidden = cloud.connected();
   for (const r of document.querySelectorAll('input[name=dockSide]')) r.checked = r.value === settings.dockSide;
   for (const n of ['viewMode', 'readDir', 'barMode']) {
     for (const r of document.querySelectorAll(`input[name=${n}]`)) r.checked = r.value === settings[n];
@@ -1816,6 +1886,13 @@ $('lowLatency').addEventListener('change', (e) => { settings.lowLatency = e.targ
 $('exportFolderDef').addEventListener('change', (e) => {
   settings.exportFolder = cloud.normalizeFolder(e.target.value);
   e.target.value = settings.exportFolder;
+  saveSettings();
+});
+$('exportFolderBrowse').addEventListener('click', async () => {
+  const f = await chooseDbxFolder($('exportFolderDef').value);
+  if (f === null) return;
+  settings.exportFolder = f;
+  $('exportFolderDef').value = f;
   saveSettings();
 });
 $('fullscreen').addEventListener('change', (e) => {

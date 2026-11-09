@@ -12,7 +12,7 @@
    - 競合(同じ作品を両方の端末で変えた): どちらも捨てない。
      Dropbox側の版を「（別端末の版）」として別作品に取り込み、こちらの版で上書きする
    ============================================================ */
-import * as db from './db.js?v=21';
+import * as db from './db.js?v=22';
 
 const BASE = '/NameBuilder';
 const PREFIX = 'namebuilder';
@@ -143,6 +143,37 @@ export async function uploadTo(folder, name, blob) {
   const path = (dir ? `/${dir}/` : '/') + name;
   if (storage._contentUpload) return storage._contentUpload(path, blob);
   return storage.save(path.slice(1), blob); // テスト用ブリッジ
+}
+/** Dropbox内のフォルダ(トップからのパス。空ならトップ)の中にあるフォルダの名前一覧(フォルダ選び用)。
+ *  フォルダが無ければ null */
+export async function listFolders(folder) {
+  if (!connected()) throw new Error('Dropboxに接続していない');
+  const dir = normalizeFolder(folder);
+  let d;
+  try {
+    d = await storage._apiFetch('files/list_folder', { path: dir ? '/' + dir : '', recursive: false });
+  } catch (e) {
+    if (isNotFound(e)) return null;
+    throw e;
+  }
+  let entries = d.entries;
+  while (d.has_more) {
+    d = await storage._apiFetch('files/list_folder/continue', { cursor: d.cursor });
+    entries = entries.concat(d.entries);
+  }
+  return entries.filter((en) => en['.tag'] === 'folder').map((en) => en.name)
+    .sort((a, b) => a.localeCompare(b, 'ja', { numeric: true }));
+}
+/** Dropbox内にフォルダを作る(すでにあれば何もしない) */
+export async function makeFolder(folder) {
+  if (!connected()) throw new Error('Dropboxに接続していない');
+  const dir = normalizeFolder(folder);
+  if (!dir) return;
+  try {
+    await storage._apiFetch('files/create_folder_v2', { path: '/' + dir, autorename: false });
+  } catch (e) {
+    if (!/conflict/.test(String(e?.message || e))) throw e;
+  }
 }
 /** 「/漫画\ネーム/」→「漫画/ネーム」。空・「/」はトップ */
 export function normalizeFolder(s) {

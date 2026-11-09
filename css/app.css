@@ -247,3 +247,17 @@ input[type=checkbox], input[type=radio] { width: 18px; height: 18px; accent-colo
 #editor.vbar .sync-lamp.compact { margin: 2px 0; }
 
 .text-input { width: 100%; height: 40px; margin-top: 4px; padding: 0 10px; border: 1px solid var(--line); border-radius: 8px; font-size: 16px; user-select: text; -webkit-user-select: text; }
+
+/* ---------- Dropboxのフォルダ選び ---------- */
+.folder-field { display: flex; gap: 8px; align-items: center; margin-top: 4px; }
+.folder-field .text-input { flex: 1; min-width: 0; margin-top: 0; }
+.folder-field .btn { flex: none; height: 40px; }
+.folder-path { font-size: 14px; font-weight: 600; word-break: break-all; }
+.folder-list { list-style: none; margin: 8px 0 0; padding: 0; border: 1px solid var(--line); border-radius: 8px; max-height: min(50vh, 360px); overflow-y: auto; }
+.folder-list:empty { display: none; }
+.folder-list li + li { border-top: 1px solid var(--line); }
+.folder-list button { display: flex; align-items: center; gap: 8px; width: 100%; min-height: 44px; padding: 0 12px; border: none; background: none; font-size: 15px; text-align: left; cursor: pointer; color: inherit; }
+.folder-list button:hover { background: #f5f6f7; }
+.folder-list .up { color: var(--muted, #5b6168); }
+#folderDlg .actions { flex-wrap: wrap; }
+#folderDlg .actions .spacer { flex: 1; }

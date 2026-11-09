@@ -19,7 +19,7 @@
 <!-- Dropbox連携の共通ライブラリ(無改造で利用)。読み込めなければローカルのみで動く -->
 <link rel="stylesheet" href="https://moyorieki.github.io/storage-bridge/storage-bridge.css">
 <script src="https://moyorieki.github.io/storage-bridge/storage-bridge.js"></script>
-<link rel="stylesheet" href="css/app.css?v=21">
+<link rel="stylesheet" href="css/app.css?v=22">
 <title>ネームビルダー</title>
 </head>
 <body>
@@ -157,7 +157,10 @@
   <label class="row"><input id="exZip" type="checkbox"> 複数ページはZIPにまとめる</label>
   <label class="row"><input id="exDbx" type="checkbox"> Dropboxのフォルダに保存</label>
   <div id="exDbxRow" hidden>
-    <input id="exFolder" class="text-input" type="text" autocomplete="off" enterkeyhint="done" placeholder="空欄 = Dropboxのトップ">
+    <div class="folder-field">
+      <input id="exFolder" class="text-input" type="text" autocomplete="off" enterkeyhint="done" placeholder="空欄 = Dropboxのトップ">
+      <button id="exFolderBrowse" class="btn" type="button">参照…</button>
+    </div>
     <p class="muted small">例: 漫画/ネーム（無いフォルダは作られる。同じ名前のファイルは上書き）。既定のフォルダは設定で変えられる。</p>
   </div>
   <p id="exDbxOff" class="muted small" hidden>Dropboxに接続していないので、この端末に保存する。</p>
@@ -165,6 +168,20 @@
   <div class="actions">
     <button class="btn" type="button" data-close>キャンセル</button>
     <button id="exGo" class="btn primary" type="button">保存</button>
+  </div>
+</dialog>
+
+<!-- ============ Dropboxのフォルダ選び ============ -->
+<dialog id="folderDlg" class="pop">
+  <h2>Dropboxのフォルダを選ぶ</h2>
+  <p id="folderPath" class="folder-path"></p>
+  <ul id="folderList" class="folder-list"></ul>
+  <p id="folderStatus" class="muted small"></p>
+  <div class="actions">
+    <button id="folderNew" class="btn" type="button">＋ 新しいフォルダ</button>
+    <span class="spacer"></span>
+    <button class="btn" type="button" data-close>キャンセル</button>
+    <button id="folderOk" class="btn primary" type="button">ここにする</button>
   </div>
 </dialog>
 
@@ -235,8 +252,14 @@
     <label><input type="radio" name="dockSide" value="left"> 左</label>
     <label><input type="radio" name="dockSide" value="right"> 右</label>
   </div>
-  <label class="row col">書き出し先のDropboxフォルダ（既定） <span class="muted small">PNG書き出しで「Dropboxのフォルダに保存」したときの保存先。空欄ならDropboxのトップ</span>
-    <input id="exportFolderDef" class="text-input" type="text" autocomplete="off" enterkeyhint="done" placeholder="空欄 = Dropboxのトップ"></label>
+  <div>
+    <label class="row col" for="exportFolderDef">書き出し先のDropboxフォルダ（既定） <span class="muted small">PNG書き出しで「Dropboxのフォルダに保存」したときの保存先。空欄ならDropboxのトップ</span></label>
+    <div class="folder-field">
+      <input id="exportFolderDef" class="text-input" type="text" autocomplete="off" enterkeyhint="done" placeholder="空欄 = Dropboxのトップ">
+      <button id="exportFolderBrowse" class="btn" type="button">参照…</button>
+    </div>
+    <p id="exportFolderOff" class="muted small" hidden>「参照」はDropboxに接続すると使える。</p>
+  </div>
   <p class="muted small" id="persistInfo"></p>
   <p class="small"><a href="probe.html" target="_blank" rel="noopener">ペン入力の診断ページ</a>（筆圧・傾き・ボタン・遅延の確認）</p>
   <div class="actions"><button class="btn" type="button" data-close>閉じる</button></div>
@@ -273,6 +296,6 @@
 </script>
 <!-- 版番号(?v=)は css/js を変えるたびに index.html と js/app.js の両方で上げる。
      新旧のファイルが混ざって読み込みに失敗するのを防ぐため -->
-<script type="module" src="js/app.js?v=21"></script>
+<script type="module" src="js/app.js?v=22"></script>
 </body>
 </html>
