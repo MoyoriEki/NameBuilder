@@ -19,7 +19,7 @@
 <!-- Dropbox連携の共通ライブラリ(無改造で利用)。読み込めなければローカルのみで動く -->
 <link rel="stylesheet" href="https://moyorieki.github.io/storage-bridge/storage-bridge.css">
 <script src="https://moyorieki.github.io/storage-bridge/storage-bridge.js"></script>
-<link rel="stylesheet" href="css/app.css?v=20">
+<link rel="stylesheet" href="css/app.css?v=21">
 <title>ネームビルダー</title>
 </head>
 <body>
@@ -154,7 +154,13 @@
     <label><input type="radio" name="exBg" value="white" checked> 背景 白</label>
     <label><input type="radio" name="exBg" value="clear"> 背景 透明</label>
   </div>
-  <p class="muted small">複数ページはZIPにまとめる。</p>
+  <label class="row"><input id="exZip" type="checkbox"> 複数ページはZIPにまとめる</label>
+  <label class="row"><input id="exDbx" type="checkbox"> Dropboxのフォルダに保存</label>
+  <div id="exDbxRow" hidden>
+    <input id="exFolder" class="text-input" type="text" autocomplete="off" enterkeyhint="done" placeholder="空欄 = Dropboxのトップ">
+    <p class="muted small">例: 漫画/ネーム（無いフォルダは作られる。同じ名前のファイルは上書き）。既定のフォルダは設定で変えられる。</p>
+  </div>
+  <p id="exDbxOff" class="muted small" hidden>Dropboxに接続していないので、この端末に保存する。</p>
   <p id="exStatus" class="muted small"></p>
   <div class="actions">
     <button class="btn" type="button" data-close>キャンセル</button>
@@ -229,6 +235,8 @@
     <label><input type="radio" name="dockSide" value="left"> 左</label>
     <label><input type="radio" name="dockSide" value="right"> 右</label>
   </div>
+  <label class="row col">書き出し先のDropboxフォルダ（既定） <span class="muted small">PNG書き出しで「Dropboxのフォルダに保存」したときの保存先。空欄ならDropboxのトップ</span>
+    <input id="exportFolderDef" class="text-input" type="text" autocomplete="off" enterkeyhint="done" placeholder="空欄 = Dropboxのトップ"></label>
   <p class="muted small" id="persistInfo"></p>
   <p class="small"><a href="probe.html" target="_blank" rel="noopener">ペン入力の診断ページ</a>（筆圧・傾き・ボタン・遅延の確認）</p>
   <div class="actions"><button class="btn" type="button" data-close>閉じる</button></div>
@@ -265,6 +273,6 @@
 </script>
 <!-- 版番号(?v=)は css/js を変えるたびに index.html と js/app.js の両方で上げる。
      新旧のファイルが混ざって読み込みに失敗するのを防ぐため -->
-<script type="module" src="js/app.js?v=20"></script>
+<script type="module" src="js/app.js?v=21"></script>
 </body>
 </html>

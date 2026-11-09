@@ -12,7 +12,7 @@
    - 競合(同じ作品を両方の端末で変えた): どちらも捨てない。
      Dropbox側の版を「（別端末の版）」として別作品に取り込み、こちらの版で上書きする
    ============================================================ */
-import * as db from './db.js?v=20';
+import * as db from './db.js?v=21';
 
 const BASE = '/NameBuilder';
 const PREFIX = 'namebuilder';
@@ -132,6 +132,21 @@ export function syncNow() {
     } while (again);
   })().finally(() => { running = null; hooks?.changed?.(); });
   return running;
+}
+
+/** 同期用フォルダ(/NameBuilder)の外、Dropbox内の好きな場所にファイルを置く(画像の書き出し用)。
+ *  folder は「漫画/ネーム」のような Dropbox のトップからのパス(空ならトップ)。途中のフォルダは自動で作られる。
+ *  同じ名前のファイルがあれば上書き */
+export async function uploadTo(folder, name, blob) {
+  if (!connected()) throw new Error('Dropboxに接続していない');
+  const dir = normalizeFolder(folder);
+  const path = (dir ? `/${dir}/` : '/') + name;
+  if (storage._contentUpload) return storage._contentUpload(path, blob);
+  return storage.save(path.slice(1), blob); // テスト用ブリッジ
+}
+/** 「/漫画\ネーム/」→「漫画/ネーム」。空・「/」はトップ */
+export function normalizeFolder(s) {
+  return String(s || '').replace(/\\/g, '/').split('/').map((p) => p.trim()).filter((p) => p && p !== '.' && p !== '..').join('/');
 }
 
 export function connect() { storage?._ui?._onBtnClick ? storage._ui._onBtnClick() : storage?.connect(); }

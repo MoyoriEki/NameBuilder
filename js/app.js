@@ -6,10 +6,10 @@
    - 描画中の線だけは重ねキャンバス(#live)に描き、
      ペンを離したらページのキャッシュへ焼き込む
    ============================================================ */
-import * as db from './db.js?v=20';
-import { drawStroke, drawLiveStroke, isOpacityStroke, opacityAt, bbox, bboxHit, hitStroke, eraseSplit, sweep } from './ink.js?v=20';
-import { pngWithDpi, makeZip } from './zip.js?v=20';
-import * as cloud from './cloud.js?v=20';
+import * as db from './db.js?v=21';
+import { drawStroke, drawLiveStroke, isOpacityStroke, opacityAt, bbox, bboxHit, hitStroke, eraseSplit, sweep } from './ink.js?v=21';
+import { pngWithDpi, makeZip } from './zip.js?v=21';
+import * as cloud from './cloud.js?v=21';
 
 const PAGE_W = 2508, PAGE_H = 3541, DPI = 350;
 const GAP = 140;                 // ページ間の隙間(page-px)
@@ -51,6 +51,9 @@ const DEFAULTS = {
   flipNear: 0.35,     // 隣のページの近さ(今のページの端から画面の端までのうち、どれだけ離して置くか。0=すぐ横 1=画面の外)
   lowLatency: false,  // 低遅延描画(実験的)
   fullscreen: true,   // 作品を開いている間は全画面(Androidの上のステータスバーと下のナビゲーションバーを隠す)
+  exportDbx: false,   // PNG書き出しをDropboxのフォルダに保存する(前回の選択を覚える)
+  exportFolder: '',   // 書き出し先のDropboxフォルダの既定(空=トップ)
+  exportZip: false,   // 複数ページをZIPにまとめる
 };
 const settings = (() => {
   let s = {};
@@ -1641,13 +1644,23 @@ function openExportDialog() {
   $('exTo').value = n;
   $('exStatus').textContent = '';
   $('exGo').disabled = false;
+  $('exZip').checked = settings.exportZip;
+  $('exDbx').checked = settings.exportDbx;
+  $('exFolder').value = settings.exportFolder;
   syncExportRange();
   $('exportDlg').showModal();
 }
+const exportToDbx = () => cloud.connected() && $('exDbx').checked;
 function syncExportRange() {
   $('exRangeRow').hidden = document.querySelector('input[name=exRange]:checked').value !== 'range';
+  const conn = cloud.connected();
+  $('exDbx').disabled = !conn;
+  $('exDbxRow').hidden = !exportToDbx();
+  $('exDbxOff').hidden = conn || !settings.exportDbx;
 }
 for (const r of document.querySelectorAll('input[name=exRange]')) r.addEventListener('change', syncExportRange);
+$('exDbx').addEventListener('change', (e) => { settings.exportDbx = e.target.checked; saveSettings(); syncExportRange(); });
+$('exZip').addEventListener('change', (e) => { settings.exportZip = e.target.checked; saveSettings(); });
 $('exportBtn').addEventListener('click', openExportDialog);
 
 async function strokesOf(id) {
@@ -1718,24 +1731,38 @@ $('exGo').addEventListener('click', async () => {
   }
   const title = safeName(E.doc.title);
   const status = $('exStatus');
+  const toDbx = exportToDbx();
+  const folder = cloud.normalizeFolder($('exFolder').value);
+  const zip = from !== to && $('exZip').checked;
+  const where = toDbx ? `Dropboxの「${folder ? '/' + folder : 'トップ'}」に` : '';
   $('exGo').disabled = true;
   try {
     await flushSave();
-    if (from === to) {
-      status.textContent = '書き出し中…';
-      const blob = await renderPagePng(await strokesOf(E.doc.pages[from]), white);
-      download(blob, `${title}_p${pad3(from + 1)}.png`);
-    } else {
-      const files = [];
-      for (let i = from; i <= to; i++) {
-        status.textContent = `書き出し中… ${i - from + 1} / ${to - from + 1}`;
-        const blob = await renderPagePng(await strokesOf(E.doc.pages[i]), white);
-        files.push({ name: `${title}_p${pad3(i + 1)}.png`, data: new Uint8Array(await blob.arrayBuffer()) });
+    // 1枚ずつ: Dropboxなら上げる / 端末ならダウンロード(続けて出すとブラウザが止めることがあるので少し間を空ける)
+    const put = async (blob, name) => {
+      if (toDbx) await cloud.uploadTo(folder, name, blob);
+      else { download(blob, name); await new Promise((r) => setTimeout(r, 400)); }
+    };
+    const files = [];
+    const count = to - from + 1;
+    for (let i = from; i <= to; i++) {
+      status.textContent = count > 1 ? `書き出し中… ${i - from + 1} / ${count}` : '書き出し中…';
+      const blob = await renderPagePng(await strokesOf(E.doc.pages[i]), white);
+      const name = `${title}_p${pad3(i + 1)}.png`;
+      if (zip) files.push({ name, data: new Uint8Array(await blob.arrayBuffer()) });
+      else {
+        if (toDbx) status.textContent = count > 1 ? `Dropboxへ保存中… ${i - from + 1} / ${count}` : 'Dropboxへ保存中…';
+        await put(blob, name);
       }
-      status.textContent = 'ZIPにまとめ中…';
-      download(makeZip(files), `${title}_p${pad3(from + 1)}-${pad3(to + 1)}.zip`);
     }
-    status.textContent = '保存した';
+    if (zip) {
+      status.textContent = 'ZIPにまとめ中…';
+      const z = makeZip(files);
+      if (toDbx) status.textContent = 'Dropboxへ保存中…';
+      await put(z, `${title}_p${pad3(from + 1)}-${pad3(to + 1)}.zip`);
+    }
+    status.textContent = where + '保存した';
+    if (toDbx) toast(where + '保存した');
     setTimeout(() => $('exportDlg').close(), 600);
   } catch (err) {
     console.error(err);
@@ -1758,6 +1785,7 @@ async function openSettings() {
   $('tapUndo').checked = settings.tapUndo;
   $('lowLatency').checked = settings.lowLatency;
   $('fullscreen').checked = settings.fullscreen;
+  $('exportFolderDef').value = settings.exportFolder;
   for (const r of document.querySelectorAll('input[name=dockSide]')) r.checked = r.value === settings.dockSide;
   for (const n of ['viewMode', 'readDir', 'barMode']) {
     for (const r of document.querySelectorAll(`input[name=${n}]`)) r.checked = r.value === settings[n];
@@ -1785,6 +1813,11 @@ $('sideEraser').addEventListener('change', (e) => { settings.sideEraser = e.targ
 $('fingerDraw').addEventListener('change', (e) => { settings.fingerDraw = e.target.checked; saveSettings(); });
 $('tapUndo').addEventListener('change', (e) => { settings.tapUndo = e.target.checked; saveSettings(); });
 $('lowLatency').addEventListener('change', (e) => { settings.lowLatency = e.target.checked; saveSettings(); hideInk(); });
+$('exportFolderDef').addEventListener('change', (e) => {
+  settings.exportFolder = cloud.normalizeFolder(e.target.value);
+  e.target.value = settings.exportFolder;
+  saveSettings();
+});
 $('fullscreen').addEventListener('change', (e) => {
   settings.fullscreen = e.target.checked;
   saveSettings();
