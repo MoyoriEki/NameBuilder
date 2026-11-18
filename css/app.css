@@ -119,6 +119,20 @@ button { font: inherit; color: inherit; }
   background: linear-gradient(90deg, #f0a5a5 0 40%, #f5f5f5 40%); box-shadow: inset 0 0 0 1.5px #889;
 }
 .tool .mode-badge { position: absolute; right: 3px; bottom: 1px; font-size: 10px; color: var(--muted); }
+.tool-ico { width: 26px; height: 26px; fill: none; stroke: #3d444b; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+#selectBtn .tool-ico { margin-bottom: 6px; }
+
+/* 選択中の操作ボタン(選択枠のそば) */
+.sel-bar {
+  position: absolute; z-index: 12; display: flex; gap: 2px; padding: 4px;
+  background: var(--panel); border-radius: 12px; box-shadow: var(--shadow);
+}
+.sel-bar button {
+  height: 38px; min-width: 48px; padding: 0 12px; border: none; border-radius: 8px;
+  background: transparent; font-size: 14px; cursor: pointer;
+}
+.sel-bar button:hover { background: rgba(0, 0, 0, 0.05); }
+.sel-bar button.danger { color: var(--danger); }
 
 .zoom-pill { position: absolute; right: 12px; bottom: 12px; z-index: 10; box-shadow: var(--shadow); }
 .pagenav { display: flex; align-items: center; gap: 2px; }
@@ -196,6 +210,16 @@ input[type=checkbox], input[type=radio] { width: 18px; height: 18px; accent-colo
   box-shadow: 0 1px 4px rgba(0, 0, 0, 0.18); border: 3px solid transparent; overflow: hidden;
 }
 .pg-thumb img { width: 100%; height: 100%; object-fit: contain; display: block; }
+.page-grid { touch-action: pan-y; -webkit-user-select: none; user-select: none; }
+.pg img { -webkit-touch-callout: none; pointer-events: none; }
+.pg.dragging { opacity: 0.35; }
+.pg.dragging .pg-thumb { border: 3px dashed var(--accent); box-shadow: none; }
+.page-grid.reordering .pg { cursor: grabbing; }
+.pg-ghost {
+  position: fixed; left: 0; top: 0; margin: 0; z-index: 60; pointer-events: none;
+  border-color: var(--accent) !important; box-shadow: 0 10px 28px rgba(20, 30, 40, 0.35);
+  will-change: transform;
+}
 .pg.cur .pg-thumb { border-color: var(--accent); }
 .pg.cur .pg-num { color: var(--accent); font-weight: 600; }
 .pg-row { display: flex; align-items: center; justify-content: space-between; margin-top: 2px; }
