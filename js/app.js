@@ -6,10 +6,11 @@
    - 描画中の線だけは重ねキャンバス(#live)に描き、
      ペンを離したらページのキャッシュへ焼き込む
    ============================================================ */
-import * as db from './db.js?v=21';
-import { drawStroke, drawLiveStroke, isOpacityStroke, opacityAt, bbox, bboxHit, hitStroke, eraseSplit, sweep } from './ink.js?v=21';
-import { pngWithDpi, makeZip } from './zip.js?v=21';
-import * as cloud from './cloud.js?v=21';
+import * as db from './db.js?v=22';
+import { drawStroke, drawLiveStroke, isOpacityStroke, opacityAt, bbox, bboxHit, hitStroke, eraseSplit, sweep,
+  fractionInPoly, topStrokeAt, unionBox, transformStroke } from './ink.js?v=22';
+import { pngWithDpi, makeZip } from './zip.js?v=22';
+import * as cloud from './cloud.js?v=22';
 
 const PAGE_W = 2508, PAGE_H = 3541, DPI = 350;
 const GAP = 140;                 // ページ間の隙間(page-px)
@@ -37,6 +38,7 @@ const DEFAULTS = {
   tool: 'pen0',
   eraserMode: 'part',
   eraserSize: 40,
+  selMode: 'lasso',   // 選択ツール: lasso=投げ縄 / rect=四角
   stab: 0.3,
   gamma: 1.0,
   sideEraser: true,
@@ -378,7 +380,8 @@ function buildCache(id, ps, scale) {
   ctx.setTransform(1, 0, 0, 1, 0, 0);
   ctx.clearRect(0, 0, w, h);
   ctx.setTransform(scale, 0, 0, scale, 0, 0);
-  for (const st of ps.strokes) drawStroke(ctx, st);
+  const hid = ps.hidden;
+  for (const st of ps.strokes) if (!hid || !hid.has(st)) drawStroke(ctx, st);
   c.rev = ps.rev;
   return c;
 }
@@ -428,7 +431,8 @@ function drawPage(ctx, i, ox, oy, k) {
     ctx.beginPath();
     ctx.rect(0, 0, PAGE_W, PAGE_H);
     ctx.clip();
-    for (const st of ps.strokes) if (bboxHit(bbox(st), vx0, vy0, vx1, vy1)) drawStroke(ctx, st);
+    const hid = ps.hidden;
+    for (const st of ps.strokes) if ((!hid || !hid.has(st)) && bboxHit(bbox(st), vx0, vy0, vx1, vy1)) drawStroke(ctx, st);
     ctx.restore();
   } else {
     ctx.drawImage(c.canvas, ox, oy, PAGE_W, PAGE_H);
@@ -486,11 +490,15 @@ function render() {
   } else {
     for (let i = i0; i <= i1; i++) drawPage(ctx, i, 0, i * PITCH, k);
   }
+  checkSel();
+  if (sel?.lift) drawLifted(ctx);
   updateNavUI();
   updateZoomPill();
   housekeep(i0, i1);
   if (!drawing) hideInk();
   else if (isOpacityStroke(drawing.st)) drawOpacityIncremental(true);
+  // 選択枠は画面座標で描くので、カメラが動いたらすぐ描き直す
+  if (sel || selOp || selShown) drawLive();
 }
 
 /** 見えていないページのキャッシュとストロークを手放す */
@@ -514,7 +522,7 @@ function housekeep(i0, i1) {
       return i >= i0 - 3 && i <= i1 + 3;
     };
     for (const [id, ps] of loaded) {
-      if (near(id) || E.dirty.has(id) || drawing?.pageId === id) continue;
+      if (near(id) || E.dirty.has(id) || drawing?.pageId === id || sel?.pageId === id) continue;
       ps.strokes = null;
       ps.rev++;
       const c = caches.get(id);
@@ -576,6 +584,7 @@ function drawLive() {
     tctx.restore();
     if (settings.lowLatency) inkCv.style.visibility = 'visible';
   }
+  drawSelOverlay(ctx);
   if (cursor && (erasing || isEraserTool())) {
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     const r = (settings.eraserSize / 2) * cam.z;
@@ -633,7 +642,8 @@ function setPageStrokes(pageId, arr) {
   return true;
 }
 function undo() {
-  if (!E || drawing || erasing) return;
+  if (!E || drawing || erasing || selOp) return;
+  clearSel();
   const ent = E.undo.pop();
   if (!ent) return;
   let jumped = false;
@@ -644,7 +654,8 @@ function undo() {
   toast('元に戻した');
 }
 function redo() {
-  if (!E || drawing || erasing) return;
+  if (!E || drawing || erasing || selOp) return;
+  clearSel();
   const ent = E.redo.pop();
   if (!ent) return;
   for (const e of ent) if (setPageStrokes(e.pageId, e.after)) revealPage(e.pageId);
@@ -741,6 +752,7 @@ let mousePan = null;       // { id, x, y }
 let inertia = null;
 
 const isEraserTool = () => settings.tool === 'eraser';
+const isSelTool = () => settings.tool === 'select' || settings.tool === 'move';
 const penIndex = () => Number(settings.tool.replace('pen', '')) || 0;
 
 function toWorld(e) {
@@ -784,6 +796,7 @@ function startStroke(e) {
   const ps = pageState(hit.id);
   if (!ps.strokes) { ensureLoaded(hit.id); return false; }
   const pen = settings.pens[penIndex()];
+  clearSel();
   drawing = {
     id: e.pointerId,
     pageId: hit.id,
@@ -869,6 +882,7 @@ function cancelStroke() {
 
 /* ---- 消しゴム ---- */
 function startErase(e) {
+  clearSel();
   erasing = { id: e.pointerId, before: new Map(), last: null, cx: e.clientX, cy: e.clientY };
   moveErase(e);
 }
@@ -926,6 +940,301 @@ function endErase() {
   pushHistory(entries);
   requestLive();
 }
+
+/* ---- 選択・移動 ----
+   範囲選択ツール: 投げ縄(設定で四角)で囲んだ線を選ぶ。点の半分以上が囲みの中にある線が選ばれる。
+     囲まずにタップすると、その位置の線を1本選ぶ
+   移動ツール: 線に触れてそのままドラッグすると、その線を動かす
+   どちらも、選択中は枠の中をドラッグで移動・右下の丸をドラッグで拡大縮小・枠の外をタップで解除。
+   動かしている間は、選んだ線をページのキャッシュから外して(ps.hidden)、ずらした位置に直接描く。
+   離したら変形した新しい線に差し替える(1回の移動・拡大縮小 = 1手のundo) */
+let sel = null;       // { pageId, top, strokes:[stroke], box:[x0,y0,x1,y1](page座標), rev, lift?:{ax,ay,s,dx,dy} }
+let selOp = null;     // { id, kind:'lasso'|'rect'|'move'|'scale'|'none', sx, sy, cx, cy, moved, … }
+let selShown = false; // 選択の枠・ボタンを表示しているか
+const HANDLE_R = 9;   // 拡大縮小ハンドルの見た目の半径(css-px)。当たりはこれより広く取る
+const SEL_PICK = 12;  // タップで線を拾うときの許容距離(css-px)
+
+const pageToScreen = (top, x, y) => [(x - cam.x) * cam.z + flip.dx, (y + top - cam.y) * cam.z];
+const polyBox = (poly) => {
+  let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+  for (const [x, y] of poly) { x0 = Math.min(x0, x); y0 = Math.min(y0, y); x1 = Math.max(x1, x); y1 = Math.max(y1, y); }
+  return [x0, y0, x1, y1];
+};
+const rectPoly = (a, b) => [[a[0], a[1]], [b[0], a[1]], [b[0], b[1]], [a[0], b[1]]];
+
+/** 今の(動かしている途中も含む)選択枠。page座標 */
+function selBoxNow() {
+  const b = sel.box, t = sel.lift;
+  if (!t) return b;
+  const fx = (x) => t.ax + (x - t.ax) * t.s + t.dx, fy = (y) => t.ay + (y - t.ay) * t.s + t.dy;
+  return [fx(b[0]), fy(b[1]), fx(b[2]), fy(b[3])];
+}
+function selScreenBox() {
+  const b = selBoxNow();
+  const [x0, y0] = pageToScreen(sel.top, b[0], b[1]);
+  const [x1, y1] = pageToScreen(sel.top, b[2], b[3]);
+  return [x0, y0, x1, y1];
+}
+function setSel(pageId, top, strokes) {
+  if (!strokes.length) { clearSel(); return; }
+  sel = { pageId, top, strokes, box: unionBox(strokes), rev: pageState(pageId).rev, lift: null };
+  requestLive();
+}
+function clearSel() {
+  if (!sel) return;
+  if (sel.lift) unlift();
+  sel = null;
+  requestLive();
+}
+/** 選択がまだ有効か確かめる(ページの削除・並べ替え・undo・同期での差し替えなど) */
+function checkSel() {
+  if (!sel) return;
+  const i = E.doc.pages.indexOf(sel.pageId);
+  if (i < 0 || (pageMode() && i !== curIndex())) { if (!selOp) { sel = null; } return; }
+  sel.top = i * PITCH;
+  if (selOp) return;
+  const ps = pageState(sel.pageId);
+  if (ps.rev === sel.rev) return;
+  const have = new Set(ps.strokes || []);
+  const keep = sel.strokes.filter((st) => have.has(st));
+  if (!keep.length) { sel = null; return; }
+  if (keep.length !== sel.strokes.length) { sel.strokes = keep; sel.box = unionBox(keep); }
+  sel.rev = ps.rev;
+}
+/** 選んだ線をページのキャッシュから外し、動かせる状態にする */
+function lift() {
+  const ps = pageState(sel.pageId);
+  ps.hidden = new Set(sel.strokes);
+  ps.rev++;
+  sel.rev = ps.rev;
+  sel.lift = { ax: sel.box[0], ay: sel.box[1], s: 1, dx: 0, dy: 0 };
+  beginInteraction();
+}
+function unlift() {
+  const ps = pageState(sel.pageId);
+  ps.hidden = null;
+  ps.rev++;
+  sel.rev = ps.rev;
+  sel.lift = null;
+  endInteractionSoon();
+  requestRender();
+}
+/** 動かしている線を、ずらした位置に描く(render から。ctx は world座標) */
+function drawLifted(ctx) {
+  const t = sel.lift;
+  ctx.save();
+  ctx.translate(flip.dx / cam.z, sel.top);
+  ctx.beginPath();
+  ctx.rect(0, 0, PAGE_W, PAGE_H);
+  ctx.clip();
+  ctx.translate(t.ax + t.dx, t.ay + t.dy);
+  ctx.scale(t.s, t.s);
+  ctx.translate(-t.ax, -t.ay);
+  for (const st of sel.strokes) drawStroke(ctx, st);
+  ctx.restore();
+}
+
+function startSelTool(e) {
+  const [wx, wy] = toWorld(e);
+  const base = { id: e.pointerId, sx: e.clientX, sy: e.clientY, cx: e.clientX, cy: e.clientY, moved: false };
+  if (sel && !flip.dx) {
+    const [x0, y0, x1, y1] = selScreenBox();
+    if (Math.hypot(e.clientX - x1, e.clientY - y1) <= HANDLE_R + 14) {
+      selOp = { ...base, kind: 'scale' };
+      return true;
+    }
+    const pad = 10;
+    if (e.clientX >= x0 - pad && e.clientX <= x1 + pad && e.clientY >= y0 - pad && e.clientY <= y1 + pad) {
+      selOp = { ...base, kind: 'move', w0: [wx, wy] };
+      return true;
+    }
+  }
+  const hit = pageAt(wx, wy);
+  if (!hit) { clearSel(); selOp = { ...base, kind: 'none' }; return true; }
+  const ps = pageState(hit.id);
+  if (!ps.strokes) { ensureLoaded(hit.id); return false; }
+  clearSel();
+  if (settings.tool === 'move') {
+    const st = topStrokeAt(ps.strokes, hit.x, hit.y, SEL_PICK / cam.z);
+    if (st) { setSel(hit.id, hit.top, [st]); selOp = { ...base, kind: 'move', w0: [wx, wy] }; }
+    else selOp = { ...base, kind: 'none' };
+    return true;
+  }
+  selOp = { ...base, kind: settings.selMode === 'rect' ? 'rect' : 'lasso', pageId: hit.id, top: hit.top, pts: [[hit.x, hit.y]] };
+  requestLive();
+  return true;
+}
+function moveSelOp(e) {
+  const o = selOp;
+  o.cx = e.clientX; o.cy = e.clientY;
+  if (!o.moved && Math.hypot(e.clientX - o.sx, e.clientY - o.sy) > 4) o.moved = true;
+  if (o.kind === 'lasso' || o.kind === 'rect') {
+    const evs = e.getCoalescedEvents?.() || [];
+    for (const ev of evs.length ? evs : [e]) {
+      const [wx, wy] = toWorld(ev);
+      const x = wx, y = wy - o.top;
+      if (o.kind === 'rect') o.pts[1] = [x, y];
+      else {
+        const l = o.pts[o.pts.length - 1];
+        if (Math.hypot(x - l[0], y - l[1]) * cam.z >= 2) o.pts.push([x, y]);
+      }
+    }
+    requestLive();
+    return;
+  }
+  if (!o.moved || !sel || (o.kind !== 'move' && o.kind !== 'scale')) return;
+  if (!sel.lift) lift();
+  const [wx, wy] = toWorld(e);
+  const b = sel.box, t = sel.lift;
+  if (o.kind === 'move') {
+    // 選択の中心がページの外に出ないようにする(見えなくなって戻せなくなるのを防ぐ)
+    const cx = (b[0] + b[2]) / 2, cy = (b[1] + b[3]) / 2;
+    t.dx = clamp(cx + wx - o.w0[0], 0, PAGE_W) - cx;
+    t.dy = clamp(cy + wy - o.w0[1], 0, PAGE_H) - cy;
+  } else {
+    // 左上を固定して、対角線の向きに引いた分だけ縦横同じ比率で拡大縮小
+    const w = b[2] - b[0], h = b[3] - b[1];
+    const px = wx - flip.dx / cam.z - b[0], py = wy - sel.top - b[1];
+    const s = (px * w + py * h) / (w * w + h * h);
+    t.s = clamp(s, Math.max(0.05, 6 / Math.max(w, h)), 10);
+  }
+  requestRender();
+}
+function endSelOp() {
+  const o = selOp;
+  selOp = null;
+  if (o.kind === 'lasso' || o.kind === 'rect') { finishLasso(o); return; }
+  if (sel?.lift) commitLift();
+  requestLive();
+}
+function cancelSelOp() {
+  if (!selOp) return;
+  selOp = null;
+  if (sel?.lift) unlift();
+  requestLive();
+}
+function finishLasso(o) {
+  const ps = pageState(o.pageId);
+  requestLive();
+  if (!ps.strokes || !E.doc.pages.includes(o.pageId)) return;
+  if (!o.moved) {
+    // 囲まずにタップ → その位置の線を1本選ぶ
+    const [x, y] = o.pts[0];
+    const st = topStrokeAt(ps.strokes, x, y, SEL_PICK / cam.z);
+    if (st) setSel(o.pageId, o.top, [st]);
+    return;
+  }
+  const poly = o.kind === 'rect' ? rectPoly(o.pts[0], o.pts[1] || o.pts[0]) : o.pts;
+  if (poly.length < 3) return;
+  const pb = polyBox(poly);
+  const picked = ps.strokes.filter((st) => fractionInPoly(st, poly, pb) >= 0.5);
+  if (picked.length) setSel(o.pageId, o.top, picked);
+  else toast('囲んだ中に線がない');
+}
+/** 動かし終わった: 変形した新しい線に差し替えて1手の履歴にする */
+function commitLift() {
+  const t = sel.lift;
+  const ps = pageState(sel.pageId);
+  ps.hidden = null;
+  sel.lift = null;
+  endInteractionSoon();
+  if (t.s === 1 && !t.dx && !t.dy) { ps.rev++; sel.rev = ps.rev; requestRender(); return; }
+  const map = new Map(sel.strokes.map((st) => [st, transformStroke(st, t.ax, t.ay, t.s, t.dx, t.dy)]));
+  const before = ps.strokes;
+  const after = before.map((st) => map.get(st) || st);
+  setPageStrokes(sel.pageId, after);
+  pushHistory([{ pageId: sel.pageId, before, after }]);
+  sel.strokes = [...map.values()];
+  sel.box = unionBox(sel.strokes);
+  sel.rev = ps.rev;
+  requestRender();
+}
+function deleteSel() {
+  if (!sel || selOp) return;
+  const { pageId } = sel;
+  const gone = new Set(sel.strokes);
+  const before = pageState(pageId).strokes, after = before.filter((st) => !gone.has(st));
+  sel = null;
+  if (after.length !== before.length && setPageStrokes(pageId, after)) {
+    pushHistory([{ pageId, before, after }]);
+    toast(`${before.length - after.length}本の線を削除した`);
+  }
+  requestRender();
+  requestLive();
+}
+/** 複製: 少しずらした位置に写しを作り、写しの方を選ぶ */
+function duplicateSel() {
+  if (!sel || selOp) return;
+  const { pageId, top } = sel;
+  const off = 40;
+  const copies = sel.strokes.map((st) => transformStroke(st, 0, 0, 1, off, off));
+  const before = pageState(pageId).strokes, after = before.concat(copies);
+  if (!setPageStrokes(pageId, after)) return;
+  pushHistory([{ pageId, before, after }]);
+  setSel(pageId, top, copies);
+  requestRender();
+}
+/** 投げ縄の線・選択枠・拡大縮小ハンドル・操作ボタン(drawLive から。ctx は重ねキャンバス) */
+function drawSelOverlay(ctx) {
+  const o = selOp;
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  const dashed = () => {
+    ctx.setLineDash([]);
+    ctx.lineWidth = 3;
+    ctx.strokeStyle = 'rgba(255,255,255,0.9)';
+    ctx.stroke();
+    ctx.setLineDash([6, 4]);
+    ctx.lineWidth = 1.5;
+    ctx.strokeStyle = '#3b78d8';
+    ctx.stroke();
+    ctx.setLineDash([]);
+  };
+  if (o && o.moved && (o.kind === 'lasso' || o.kind === 'rect')) {
+    const pts = o.kind === 'rect' ? rectPoly(o.pts[0], o.pts[1] || o.pts[0]) : o.pts;
+    ctx.beginPath();
+    pts.forEach(([x, y], i) => {
+      const [sx, sy] = pageToScreen(o.top, x, y);
+      if (i) ctx.lineTo(sx, sy); else ctx.moveTo(sx, sy);
+    });
+    ctx.closePath();
+    ctx.fillStyle = 'rgba(59,120,216,0.08)';
+    ctx.fill();
+    dashed();
+  }
+  let show = false;
+  if (sel && !flip.dx) {
+    const [x0, y0, x1, y1] = selScreenBox();
+    ctx.beginPath();
+    ctx.rect(x0, y0, x1 - x0, y1 - y0);
+    ctx.fillStyle = 'rgba(59,120,216,0.06)';
+    ctx.fill();
+    dashed();
+    ctx.beginPath();
+    ctx.arc(x1, y1, HANDLE_R, 0, Math.PI * 2);
+    ctx.fillStyle = '#fff';
+    ctx.fill();
+    ctx.lineWidth = 2;
+    ctx.strokeStyle = '#3b78d8';
+    ctx.stroke();
+    if (!selOp) { show = true; placeSelBar(x0, y0, x1, y1); }
+  }
+  if (show !== selShown) { selShown = show; $('selBar').hidden = !show; }
+}
+function placeSelBar(x0, y0, x1, y1) {
+  const bar = $('selBar');
+  bar.hidden = false;
+  const a = area();
+  const bw = bar.offsetWidth, bh = bar.offsetHeight;
+  let top = y0 - bh - 12;
+  if (top < a.y0) top = y1 + HANDLE_R + 12;
+  if (top + bh > viewH - 8) top = clamp(y0 + 12, a.y0, viewH - bh - 8);
+  const left = clamp((x0 + x1) / 2 - bw / 2, a.x0, Math.max(a.x0, a.x1 - bw));
+  bar.style.left = Math.round(left) + 'px';
+  bar.style.top = Math.round(top) + 'px';
+}
+$('selDel').addEventListener('click', deleteSel);
+$('selDup').addEventListener('click', duplicateSel);
+$('selClear').addEventListener('click', clearSel);
 
 /* ---- 指(スクロール・ズーム・タップでundo) ---- */
 function touchInfo() {
@@ -1096,19 +1405,19 @@ stage.addEventListener('pointerdown', (e) => {
   }
   if (e.pointerType === 'touch') {
     // 指で描いている途中に2本目の指が来たら、描きかけを捨ててジェスチャへ切り替える
-    const fing = drawing?.finger ? drawing : erasing?.finger ? erasing : null;
+    const fing = drawing?.finger ? drawing : erasing?.finger ? erasing : selOp?.finger ? selOp : null;
     if (fing) {
-      if (drawing) cancelStroke(); else endErase();
+      if (drawing) cancelStroke(); else if (erasing) endErase(); else cancelSelOp();
       touchDown({ pointerId: fing.id, clientX: fing.cx, clientY: fing.cy });
       capture(e.pointerId);
       touchDown(e);
       return;
     }
     // ペンを使っている最中・直後の指は掌とみなして無視
-    if (drawing || erasing || now() - penSeenAt < 400) return;
+    if (drawing || erasing || selOp || now() - penSeenAt < 400) return;
     if (settings.fingerDraw && !touches.size && !gest) {
       capture(e.pointerId);
-      if (startTool(e)) { if (drawing) drawing.finger = true; if (erasing) erasing.finger = true; return; }
+      if (startTool(e)) { for (const o of [drawing, erasing, selOp]) if (o) o.finger = true; return; }
     }
     capture(e.pointerId);
     touchDown(e);
@@ -1121,13 +1430,14 @@ stage.addEventListener('pointerdown', (e) => {
     e.preventDefault();
     return;
   }
-  if (drawing || erasing || flipping()) return;
+  if (drawing || erasing || selOp || flipping()) return;
   if (e.pointerType === 'mouse' && e.button !== 0) return;
   capture(e.pointerId);
   startTool(e);
 });
 function startTool(e) {
   if (wantsEraser(e)) { startErase(e); return true; }
+  if (isSelTool()) return startSelTool(e);
   return startStroke(e);
 }
 
@@ -1136,6 +1446,7 @@ stage.addEventListener('pointermove', (e) => {
   if (e.pointerType === 'pen' && e.buttons) penSeenAt = now();
   if (drawing && e.pointerId === drawing.id) { moveStroke(e); return; }
   if (erasing && e.pointerId === erasing.id) { moveErase(e); return; }
+  if (selOp && e.pointerId === selOp.id) { moveSelOp(e); return; }
   if (mousePan && e.pointerId === mousePan.id) {
     cam.x -= (e.clientX - mousePan.x) / cam.z;
     cam.y -= (e.clientY - mousePan.y) / cam.z;
@@ -1164,6 +1475,7 @@ function pointerEnd(e) {
     return;
   }
   if (erasing && e.pointerId === erasing.id) { endErase(); return; }
+  if (selOp && e.pointerId === selOp.id) { endSelOp(); return; }
   if (mousePan && e.pointerId === mousePan.id) { mousePan = null; endInteractionSoon(); return; }
   if (e.pointerType === 'touch') touchUp(e);
 }
@@ -1211,7 +1523,11 @@ window.addEventListener('keydown', (e) => {
   if (mod && k === '-') { e.preventDefault(); zoomAt(viewW / 2, viewH / 2, 0.8); clampCam(); requestRender(); return; }
   if (mod && k === '0') { e.preventDefault(); showPage(currentPage()); return; }
   if (mod) return;
+  if ((e.key === 'Delete' || e.key === 'Backspace') && sel) { e.preventDefault(); deleteSel(); return; }
+  if (e.key === 'Escape' && sel) { clearSel(); return; }
   if (k === 'e') selectTool('eraser');
+  else if (k === 'v') selectTool('move');
+  else if (k === 'l') selectTool('select');
   else if (k === '1' || k === '2' || k === '3') selectTool('pen' + (Number(k) - 1));
   else if (k === 'b' || k === 'p') selectTool('pen' + penIndex());
   else if (e.key === 'PageDown') goNext();
@@ -1252,11 +1568,16 @@ function renderDock() {
   let badge = eb.querySelector('.mode-badge');
   if (!badge) { badge = document.createElement('span'); badge.className = 'mode-badge'; eb.appendChild(badge); }
   badge.textContent = settings.eraserMode === 'part' ? '部分' : '線';
+  $('moveBtn').classList.toggle('active', settings.tool === 'move');
+  const sb = $('selectBtn');
+  sb.classList.toggle('active', settings.tool === 'select');
+  sb.querySelector('.mode-badge').textContent = settings.selMode === 'rect' ? '四角' : '投縄';
   $('dock').classList.toggle('right', settings.dockSide === 'right');
 }
 function selectTool(t) {
   settings.tool = t;
   if (t.startsWith('pen')) lastPenTool = t;
+  if (t !== 'select' && t !== 'move') clearSel();
   saveSettings();
   renderDock();
   if (!isEraserTool() && cursor) { cursor = null; requestLive(); }
@@ -1264,6 +1585,11 @@ function selectTool(t) {
 $('eraserBtn').addEventListener('click', () => {
   if (isEraserTool()) openEraserDialog();
   else selectTool('eraser');
+});
+$('moveBtn').addEventListener('click', () => selectTool('move'));
+$('selectBtn').addEventListener('click', () => {
+  if (settings.tool === 'select') openSelectDialog();
+  else selectTool('select');
 });
 $('addPageBtn').addEventListener('click', () => {
   const i = currentPage();
@@ -1438,6 +1764,15 @@ $('eraserSize').addEventListener('input', (e) => {
   saveSettings();
 });
 
+/* ---- 範囲選択の設定 ---- */
+function openSelectDialog() {
+  for (const r of document.querySelectorAll('input[name=selMode]')) r.checked = r.value === settings.selMode;
+  $('selectDlg').showModal();
+}
+for (const r of document.querySelectorAll('input[name=selMode]')) {
+  r.addEventListener('change', () => { settings.selMode = r.value; saveSettings(); renderDock(); });
+}
+
 /* ============================================================
    ページ操作
    ============================================================ */
@@ -1476,14 +1811,15 @@ async function renderPageGrid() {
   grid.innerHTML = '';
   grid.classList.toggle('selecting', pgSelectMode);
   const doc = E.doc;
-  const cur = currentPage();
-  doc.pages.forEach((id, i) => {
+  doc.pages.forEach((id) => {
     const el = document.createElement('div');
-    el.className = 'pg' + (i === cur ? ' cur' : '') + (pgSelected.has(id) ? ' checked' : '');
+    el.className = 'pg' + (pgSelected.has(id) ? ' checked' : '');
+    el.dataset.id = id;
     const th = document.createElement('div');
     th.className = 'pg-thumb';
     const img = document.createElement('img');
     img.alt = '';
+    img.draggable = false;
     th.appendChild(img);
     const check = document.createElement('span');
     check.className = 'pg-check';
@@ -1498,7 +1834,6 @@ async function renderPageGrid() {
     row.className = 'pg-row';
     const num = document.createElement('span');
     num.className = 'pg-num';
-    num.textContent = i === cur ? `${i + 1}（表示中）` : String(i + 1);
     const more = document.createElement('button');
     more.type = 'button';
     more.className = 'pg-more';
@@ -1507,23 +1842,161 @@ async function renderPageGrid() {
     more.addEventListener('click', (e) => {
       e.stopPropagation();
       const r = more.getBoundingClientRect();
-      showPageMenu(i, r.right, r.bottom);
+      const i = E.doc.pages.indexOf(id);
+      if (i >= 0) showPageMenu(i, r.right, r.bottom);
     });
     row.append(num, more);
     el.append(th, row);
     el.addEventListener('click', () => {
+      if (now() - pgDragEndAt < 400) return; // 並べ替えのドラッグの後に来るクリックは無視
       if (pgSelectMode) {
         if (pgSelected.has(id)) pgSelected.delete(id); else pgSelected.add(id);
         el.classList.toggle('checked', pgSelected.has(id));
         updatePgFoot();
         return;
       }
+      const i = E.doc.pages.indexOf(id);
+      if (i < 0) return;
       $('pagesDlg').close();
       showPage(i);
     });
     grid.appendChild(el);
   });
+  labelPageGrid();
   updatePgFoot();
+}
+/** ページ番号と「表示中」の印を、今の並びで付け直す */
+function labelPageGrid() {
+  const curId = E.doc.pages[currentPage()];
+  [...$('pageGrid').children].forEach((el, i) => {
+    const isCur = el.dataset.id === curId;
+    el.classList.toggle('cur', isCur);
+    el.querySelector('.pg-num').textContent = isCur ? `${i + 1}（表示中）` : String(i + 1);
+  });
+}
+
+/* ---- ページ一覧: ドラッグで並べ替え ----
+   ペン・マウス … サムネイルをそのままドラッグ
+   指         … 横にスワイプして動かし始めるか、長押ししてからドラッグ(縦に動かすと一覧のスクロール)
+   ドラッグ中は他のページが滑らかによけ、一覧の上下の端に近づけると自動でスクロールする */
+let pgDrag = null;    // { pid, el, type, sx, sy, x, y, active, timer, ghost, offX, offY, raf }
+let pgDragEndAt = -1e9;
+const PG_LONGPRESS = 300;
+
+function pgDragStart() {
+  const d = pgDrag;
+  if (!d || d.active) return;
+  clearTimeout(d.timer);
+  d.active = true;
+  const grid = $('pageGrid');
+  try { grid.setPointerCapture(d.pid); } catch (_) {}
+  const th = d.el.querySelector('.pg-thumb');
+  const r = th.getBoundingClientRect();
+  d.offX = d.sx - r.left;
+  d.offY = d.sy - r.top;
+  const ghost = th.cloneNode(true);
+  ghost.classList.add('pg-ghost');
+  ghost.style.width = r.width + 'px';
+  ghost.style.height = r.height + 'px';
+  $('pagesDlg').appendChild(ghost); // モーダルの上に出すため、ダイアログの中に置く
+  d.ghost = ghost;
+  d.el.classList.add('dragging');
+  grid.classList.add('reordering');
+  navigator.vibrate?.(15);
+  pgDragMove();
+  d.raf = requestAnimationFrame(pgAutoScroll);
+}
+function pgDragMove() {
+  const d = pgDrag;
+  d.ghost.style.transform = `translate(${d.x - d.offX}px, ${d.y - d.offY}px) scale(1.06)`;
+  // 指の下にあるページの位置へ、ドラッグ中のページを差し込む
+  const grid = $('pageGrid');
+  const under = document.elementsFromPoint(d.x, d.y).find((n) => n.classList?.contains('pg') && n.parentElement === grid);
+  if (!under || under === d.el || under.getAnimations().length) return;
+  const kids = [...grid.children];
+  const from = kids.indexOf(d.el), to = kids.indexOf(under);
+  const before = new Map(kids.map((k) => [k, k.getBoundingClientRect()]));
+  if (to > from) under.after(d.el); else under.before(d.el);
+  labelPageGrid(); // 番号は動かしながら付け直す
+  // FLIP: 動いたページを元の位置から新しい位置へ滑らせる
+  for (const k of kids) {
+    if (k === d.el) continue;
+    const a = before.get(k), b = k.getBoundingClientRect();
+    const dx = a.left - b.left, dy = a.top - b.top;
+    if (dx || dy) k.animate([{ transform: `translate(${dx}px, ${dy}px)` }, { transform: 'none' }], { duration: 180, easing: 'ease-out' });
+  }
+}
+function pgAutoScroll() {
+  const d = pgDrag;
+  if (!d?.active) return;
+  const grid = $('pageGrid');
+  const r = grid.getBoundingClientRect();
+  const edge = Math.min(70, r.height / 4);
+  let v = 0;
+  if (d.y < r.top + edge) v = -(r.top + edge - d.y) / edge;
+  else if (d.y > r.bottom - edge) v = (d.y - (r.bottom - edge)) / edge;
+  if (v) grid.scrollTop += clamp(v, -1, 1) * 14;
+  // スクロールした時や、よけるアニメーションが終わった時にも差し込み先を見直す
+  pgDragMove();
+  d.raf = requestAnimationFrame(pgAutoScroll);
+}
+function pgDragFinish() {
+  const d = pgDrag;
+  pgDrag = null;
+  if (!d) return;
+  clearTimeout(d.timer);
+  if (!d.active) return;
+  cancelAnimationFrame(d.raf);
+  pgDragEndAt = now();
+  d.ghost.remove();
+  d.el.classList.remove('dragging');
+  const grid = $('pageGrid');
+  grid.classList.remove('reordering');
+  const order = [...grid.children].map((k) => k.dataset.id);
+  const pages = E.doc.pages;
+  if (order.length !== pages.length || order.every((id, i) => id === pages[i])) return;
+  const viewing = pages[currentPage()];
+  pages.splice(0, pages.length, ...order);
+  // 縦スクロール表示では、見ていたページをそのまま見せ続ける
+  if (!pageMode()) showPage(pages.indexOf(viewing), cam.z);
+  labelPageGrid();
+  afterPageOp({ regrid: false });
+  const n = pages.indexOf(d.el.dataset.id) + 1;
+  toast(`${n}ページ目へ移動した`);
+}
+{
+  const grid = $('pageGrid');
+  grid.addEventListener('pointerdown', (e) => {
+    if (pgDrag || !E) return;
+    const el = e.target.closest('.pg');
+    if (!el || el.parentElement !== grid || e.target.closest('.pg-more')) return;
+    if (e.pointerType === 'mouse' && e.button !== 0) return;
+    pgDrag = { pid: e.pointerId, el, type: e.pointerType, sx: e.clientX, sy: e.clientY, x: e.clientX, y: e.clientY, active: false, timer: 0 };
+    if (e.pointerType === 'mouse') e.preventDefault(); // ドラッグで文字選択が始まらないように
+    if (e.pointerType === 'touch') pgDrag.timer = setTimeout(pgDragStart, PG_LONGPRESS);
+  });
+  grid.addEventListener('pointermove', (e) => {
+    const d = pgDrag;
+    if (!d || e.pointerId !== d.pid) return;
+    d.x = e.clientX; d.y = e.clientY;
+    if (d.active) { pgDragMove(); return; }
+    const dx = Math.abs(d.x - d.sx), dy = Math.abs(d.y - d.sy);
+    if (Math.max(dx, dy) < 8) return;
+    // 指: 横に動かしたら並べ替え、縦ならスクロールに任せる。ペン・マウスはどちらでも並べ替え
+    if (d.type !== 'touch' || dx > dy * 1.2) pgDragStart();
+    else { clearTimeout(d.timer); pgDrag = null; }
+  });
+  grid.addEventListener('pointerup', pgDragFinish);
+  grid.addEventListener('pointercancel', pgDragFinish);
+  // 並べ替え中(と、ペン・マウスで押している間)は一覧をスクロールさせない
+  grid.addEventListener('touchmove', (e) => {
+    if (pgDrag && (pgDrag.active || pgDrag.type !== 'touch')) e.preventDefault();
+  }, { passive: false });
+  grid.addEventListener('contextmenu', (e) => e.preventDefault()); // 長押しのメニューを出さない
+  $('pagesDlg').addEventListener('close', () => {
+    if (pgDrag?.active) pgDragFinish();
+    else if (pgDrag) { clearTimeout(pgDrag.timer); pgDrag = null; }
+  });
 }
 function updatePgFoot() {
   const n = pageCount();
@@ -1535,7 +2008,7 @@ function updatePgFoot() {
   $('pgDelSel').textContent = pgSelected.size ? `削除（${pgSelected.size}ページ）` : '削除';
   $('pageSelInfo').textContent = pgSelectMode
     ? `${pgSelected.size}ページ選択中`
-    : `全${n}ページ・タップで移動／⋯で操作`;
+    : `全${n}ページ・タップで移動／ドラッグで並べ替え／⋯で操作`;
 }
 function showPageMenu(i, x, y) {
   const n = pageCount();
@@ -1550,10 +2023,10 @@ function showPageMenu(i, x, y) {
   items.push({ label: '削除', danger: true, fn: () => deletePagesAsk([E.doc.pages[i]]) });
   showMenu(x, y, items);
 }
-async function afterPageOp() {
+async function afterPageOp({ regrid = true } = {}) {
   markDocDirty();
   await flushSave();
-  if ($('pagesDlg').open) await renderPageGrid();
+  if (regrid && $('pagesDlg').open) await renderPageGrid();
   clampCam();
   shownNav = '';
   requestRender();
@@ -2094,6 +2567,8 @@ async function closeDoc() {
   if (!E) return;
   if (drawing) endStroke(null);
   if (erasing) endErase();
+  cancelSelOp();
+  clearSel();
   E.doc.lastPage = currentPage();
   E.docDirty = true;
   await flushSave();
@@ -2107,6 +2582,9 @@ function discardEditor(reopening = false) {
   for (const c of caches.values()) c.canvas.width = c.canvas.height = 0;
   caches.clear();
   E = null;
+  sel = selOp = null;
+  selShown = false;
+  $('selBar').hidden = true;
   liveCtx.clearRect(0, 0, liveCv.width, liveCv.height);
   $('editor').hidden = true;
   $('listScreen').hidden = false;

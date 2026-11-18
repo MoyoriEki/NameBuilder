@@ -261,3 +261,61 @@ export function sweep(x0, y0, x1, y1, r) {
   for (let k = 1; k <= n; k++) out.push([x0 + (x1 - x0) * (k / n), y0 + (y1 - y0) * (k / n)]);
   return out;
 }
+
+/* ---- 選択(投げ縄・四角)と変形 ---- */
+
+/** 点(x,y)が多角形 poly([[x,y], …])の中か(偶奇規則) */
+export function pointInPoly(x, y, poly) {
+  let inside = false;
+  for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+    const [xi, yi] = poly[i], [xj, yj] = poly[j];
+    if ((yi > y) !== (yj > y) && x < ((xj - xi) * (y - yi)) / (yj - yi) + xi) inside = !inside;
+  }
+  return inside;
+}
+
+/** 線の点のうち、多角形の中にある割合(0..1)。pb は多角形の外接矩形 [x0,y0,x1,y1] */
+export function fractionInPoly(st, poly, pb) {
+  const b = bbox(st);
+  if (!bboxHit(b, pb[0], pb[1], pb[2], pb[3])) return 0;
+  const p = st.p;
+  const n = p.length / 3;
+  // 長い線は間引いて調べる(最大400点)
+  const step = Math.max(1, Math.floor(n / 400));
+  let hit = 0, total = 0;
+  for (let i = 0; i < n; i += step) {
+    const x = p[i * 3], y = p[i * 3 + 1];
+    total++;
+    if (x >= pb[0] && x <= pb[2] && y >= pb[1] && y <= pb[3] && pointInPoly(x, y, poly)) hit++;
+  }
+  return total ? hit / total : 0;
+}
+
+/** 点(x,y)から r 以内にある線のうち、いちばん上(最後に描いた)もの */
+export function topStrokeAt(strokes, x, y, r) {
+  for (let i = strokes.length - 1; i >= 0; i--) if (hitStroke(strokes[i], x, y, r)) return strokes[i];
+  return null;
+}
+
+/** 線の集まりの外接矩形(太さ込み) */
+export function unionBox(strokes) {
+  let b = null;
+  for (const st of strokes) {
+    const s = bbox(st);
+    b = b ? [Math.min(b[0], s[0]), Math.min(b[1], s[1]), Math.max(b[2], s[2]), Math.max(b[3], s[3])] : s.slice();
+  }
+  return b;
+}
+
+/** 変形した新しい線を返す: (ax,ay) を中心に s 倍し、(dx,dy) ずらす。太さも s 倍 */
+export function transformStroke(st, ax, ay, s, dx, dy) {
+  const p = st.p, q = new Float32Array(p.length);
+  for (let i = 0; i < p.length; i += 3) {
+    q[i] = ax + (p[i] - ax) * s + dx;
+    q[i + 1] = ay + (p[i + 1] - ay) * s + dy;
+    q[i + 2] = p[i + 2];
+  }
+  const out = { ...st, p: q };
+  if (s !== 1) out.w = Math.max(0.3, Math.round(st.w * s * 100) / 100);
+  return out;
+}
