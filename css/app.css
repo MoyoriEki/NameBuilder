@@ -121,6 +121,16 @@ button { font: inherit; color: inherit; }
 .tool .mode-badge { position: absolute; right: 3px; bottom: 1px; font-size: 10px; color: var(--muted); }
 .tool-ico { width: 26px; height: 26px; fill: none; stroke: #3d444b; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
 #selectBtn .tool-ico { margin-bottom: 6px; }
+.text-ico {
+  font-size: 24px; font-weight: 700; line-height: 1; margin-bottom: 6px;
+  paint-order: stroke; -webkit-text-stroke: 3px #fff; text-shadow: 0 0 1px #889;
+}
+#fillBtn .tool-ico { margin: 0 6px 6px 0; }
+.fill-dot {
+  position: absolute; right: 6px; bottom: 6px; width: 14px; height: 14px; border-radius: 50%;
+  box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.2), 0 0 0 2px #fff;
+}
+.sel-bar button:disabled { opacity: 0.35; cursor: default; background: transparent; }
 
 /* 選択中の操作ボタン(選択枠のそば) */
 .sel-bar {
