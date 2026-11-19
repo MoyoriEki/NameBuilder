@@ -2,7 +2,11 @@
    ストローク(線)の幾何
    stroke = { c:'#rrggbb', w:最大太さ(page-px), t:筆圧の効き(0=一定), p:Float32Array[x,y,pr, …],
               o?:筆圧0のときの濃さ(0..1。あれば「筆圧で濃さが変わる線」),
-              of?:真っ黒(濃さ100%)になる筆圧(0..1。無ければ1), og?:濃さのカーブ(無ければ1) }
+              of?:真っ黒(濃さ100%)になる筆圧(0..1。無ければ1), og?:濃さのカーブ(無ければ1),
+              x?:1 なら文字ペンの線(オートレイヤー: いつも一番上に描く), b?:文字ペンのフチの太さ(page-px),
+              k?:'f' なら塗り(バケツ)。p は輪郭の点列で、筆圧の欄が1の点から新しい輪郭が始まる。w=0 }
+   - 文字ペンの線は、ほかの線・塗りより必ず上に描く。フチ(白)を全部描いてから中身を描くので、
+     フチが隣の文字を隠さない。配列の中でも文字ペンの線は後ろにまとめる(addStrokes)
    - 点列はページ座標(0..W, 0..H)。手ブレ補正は入力時に済ませた後の座標を保存する
      (描き直し・部分消しで形が変わらないよう、描画側では平滑化をかけない)
    - 輪郭は perfect-freehand で生成し、Path2D をストロークごとにキャッシュ
@@ -139,8 +143,100 @@ function fillGroups(ctx, groups, thicken) {
   ctx.globalCompositeOperation = prev;
 }
 
+/* ---- 塗り(バケツ) ---- */
+export const isFill = (st) => st.k === 'f';
+export const isText = (st) => !!st.x;
+const fillCache = new WeakMap();
+/** 塗りの輪郭を Path2D に。偶奇規則で塗るので、穴(線の内側など)はそのまま穴になる */
+export function fillPath(st) {
+  let path = fillCache.get(st);
+  if (!path) {
+    path = new Path2D();
+    const p = st.p;
+    for (let i = 0; i < p.length; i += 3) {
+      if (p[i + 2] > 0.5 || i === 0) { if (i) path.closePath(); path.moveTo(p[i], p[i + 1]); }
+      else path.lineTo(p[i], p[i + 1]);
+    }
+    path.closePath();
+    fillCache.set(st, path);
+  }
+  return path;
+}
+/** 輪郭の配列 [[x,y,x,y,…], …] → 塗りのストローク */
+export function makeFill(c, contours) {
+  const n = contours.reduce((a, q) => a + q.length / 2, 0);
+  const p = new Float32Array(n * 3);
+  let k = 0;
+  for (const q of contours) {
+    for (let i = 0; i < q.length; i += 2, k += 3) {
+      p[k] = q[i]; p[k + 1] = q[i + 1]; p[k + 2] = i === 0 ? 1 : 0;
+    }
+  }
+  return { c, w: 0, t: 0, k: 'f', p };
+}
+/** 塗りの中に点があるか(偶奇規則) */
+function inFill(st, x, y) {
+  const p = st.p;
+  let inside = false, start = 0;
+  for (let i = 0; i < p.length; i += 3) {
+    const next = i + 3 >= p.length || p[i + 5] > 0.5 ? start : i + 3; // 輪郭の最後の点は最初の点へつなぐ
+    const xi = p[i], yi = p[i + 1], xj = p[next], yj = p[next + 1];
+    if ((yi > y) !== (yj > y) && x < ((xj - xi) * (y - yi)) / (yj - yi) + xi) inside = !inside;
+    if (next === start) start = i + 3;
+  }
+  return inside;
+}
+function fillEdgeNear(st, x, y, r) {
+  const p = st.p, rr = r * r;
+  let start = 0;
+  for (let i = 0; i < p.length; i += 3) {
+    const next = i + 3 >= p.length || p[i + 5] > 0.5 ? start : i + 3;
+    if (segDist2(x, y, p[i], p[i + 1], p[next], p[next + 1]) <= rr) return true;
+    if (next === start) start = i + 3;
+  }
+  return false;
+}
+
+/** 文字ペンのフチ(白)。中身より先に描く */
+function drawBorder(ctx, path, b) {
+  ctx.strokeStyle = '#fff';
+  ctx.lineWidth = b * 2;
+  ctx.lineJoin = 'round';
+  ctx.lineCap = 'round';
+  ctx.stroke(path);
+}
+
+/** 線の並びを描く。文字ペンの線は最後に、フチ → 中身 の順でまとめて描く。
+ *  skip: 描かない線の Set(動かしている最中の線など) */
+export function drawStrokes(ctx, strokes, thicken = 0, skip = null) {
+  let text = null;
+  for (const st of strokes) {
+    if (skip && skip.has(st)) continue;
+    if (st.x) { (text ||= []).push(st); continue; }
+    drawStroke(ctx, st, thicken);
+  }
+  if (!text) return;
+  for (const st of text) if (st.b > 0) drawBorder(ctx, strokePath(st), st.b);
+  for (const st of text) drawStroke(ctx, st, thicken);
+}
+/** 新しい線を足した配列を返す。文字ペンの線はいつも後ろ(上)、それ以外は文字ペンの線より前に入れる */
+export function addStrokes(arr, news) {
+  const plain = news.filter((s) => !s.x), text = news.filter((s) => s.x);
+  if (!plain.length) return arr.concat(text);
+  let i = arr.length;
+  while (i > 0 && arr[i - 1].x) i--;
+  return arr.slice(0, i).concat(plain, arr.slice(i), text);
+}
+
 /** thicken: 輪郭をこの太さで縁取って太らせる(縮小サムネ用) */
 export function drawStroke(ctx, st, thicken = 0) {
+  if (st.k === 'f') {
+    const path = fillPath(st);
+    ctx.fillStyle = st.c;
+    ctx.fill(path, 'evenodd');
+    if (thicken) { ctx.strokeStyle = st.c; ctx.lineWidth = thicken; ctx.stroke(path); }
+    return;
+  }
   if (isOpacityStroke(st)) {
     let g = groupCache.get(st);
     if (!g) { g = buildGroups(st, toInput(st.p)); groupCache.set(st, g); }
@@ -158,11 +254,14 @@ export function drawStroke(ctx, st, thicken = 0) {
   }
 }
 
-/** 描画中(未確定)の線を描く。points は [x,y,pr] の配列 */
-export function drawLiveStroke(ctx, st, points, last = false) {
+/** 描画中(未確定)の線を描く。points は [x,y,pr] の配列。
+ *  文字ペンの線は フチ → under()(既にある文字の中身を描き直す) → 中身 の順 */
+export function drawLiveStroke(ctx, st, points, last = false, under = null) {
   if (isOpacityStroke(st)) { fillGroups(ctx, buildGroups(st, points), 0); return; }
+  const path = livePath(st, points, last);
+  if (st.x && st.b > 0) { drawBorder(ctx, path, st.b); under?.(); }
   ctx.fillStyle = st.c;
-  ctx.fill(livePath(st, points, last));
+  ctx.fill(path);
 }
 
 /** [minX, minY, maxX, maxY](太さ込み) */
@@ -176,7 +275,7 @@ export function bbox(st) {
       if (x < x0) x0 = x; if (x > x1) x1 = x;
       if (y < y0) y0 = y; if (y > y1) y1 = y;
     }
-    const pad = st.w * 0.6 + 1;
+    const pad = st.w * 0.6 + 1 + (st.b || 0);
     b = [x0 - pad, y0 - pad, x1 + pad, y1 + pad];
     bboxCache.set(st, b);
   }
@@ -198,6 +297,7 @@ function segDist2(px, py, ax, ay, bx, by) {
 export function hitStroke(st, x, y, r) {
   const b = bbox(st);
   if (x + r < b[0] || x - r > b[2] || y + r < b[1] || y - r > b[3]) return false;
+  if (st.k === 'f') return inFill(st, x, y) || fillEdgeNear(st, x, y, r);
   const p = st.p;
   if (p.length === 3) {
     const rr = r + radiusAt(st, p[2]);
@@ -214,6 +314,7 @@ export function hitStroke(st, x, y, r) {
  *  触れていなければ null。点の間隔が粗いと削れ方が粗くなるので、
  *  触れた線だけ細かく補間してから判定する */
 export function eraseSplit(st, x, y, r) {
+  if (st.k === 'f') return null; // 塗りの部分消しは別扱い(消しゴムを離したときに削る)
   if (!hitStroke(st, x, y, r)) return null;
   const p = st.p;
   const step = Math.max(0.75, Math.min(r * 0.35, st.w * 0.35));
@@ -316,6 +417,7 @@ export function transformStroke(st, ax, ay, s, dx, dy) {
     q[i + 2] = p[i + 2];
   }
   const out = { ...st, p: q };
-  if (s !== 1) out.w = Math.max(0.3, Math.round(st.w * s * 100) / 100);
+  if (s !== 1 && st.k !== 'f') out.w = Math.max(0.3, Math.round(st.w * s * 100) / 100);
+  if (s !== 1 && st.b) out.b = Math.round(st.b * s * 100) / 100;
   return out;
 }

@@ -12,7 +12,7 @@
    - 競合(同じ作品を両方の端末で変えた): どちらも捨てない。
      Dropbox側の版を「（別端末の版）」として別作品に取り込み、こちらの版で上書きする
    ============================================================ */
-import * as db from './db.js?v=22';
+import * as db from './db.js?v=23';
 
 const BASE = '/NameBuilder';
 const PREFIX = 'namebuilder';
@@ -412,7 +412,7 @@ function uid(p) {
 
 /* ============================================================
    ページの線データの符号化(Dropbox用)
-   'NBP1' | u32 メタJSON長 | メタJSON([[色,太さ,筆圧の効き,濃さ|null,点数], …]) | 0埋め(偶数へ)
+   'NBP1' | u32 メタJSON長 | メタJSON([[色,太さ,筆圧の効き,濃さ|null,点数(, 真っ黒の筆圧, 濃さのカーブ(, 種類 'f'|'x', フチ))], …]) | 0埋め(偶数へ)
    | Int16 x,y(1/8 px 単位) × 点数 | Uint8 筆圧(0..255) × 点数
    これ全体を gzip して 'NBZ1' を前に付ける(CompressionStream が無い環境では生のまま)
    ============================================================ */
@@ -424,7 +424,10 @@ export async function encodePage(strokes) {
   // 6・7番目(真っ黒になる筆圧・濃さのカーブ)は後から足した。古い版は読み飛ばすだけなので互換
   const meta = strokes.map((s) => {
     const m = [s.c, s.w, s.t, s.o ?? null, s.p.length / 3];
-    if (s.of !== undefined || s.og !== undefined) m.push(s.of ?? null, s.og ?? null);
+    // 8・9番目(種類 'f'=塗り/'x'=文字ペン・文字ペンのフチ)も後から足した
+    const kind = s.k === 'f' ? 'f' : s.x ? 'x' : null;
+    if (s.of !== undefined || s.og !== undefined || kind) m.push(s.of ?? null, s.og ?? null);
+    if (kind) m.push(kind, s.b ?? 0);
     return m;
   });
   const metaBytes = new TextEncoder().encode(JSON.stringify(meta));
@@ -472,7 +475,7 @@ export async function decodePage(ab) {
   const pr = new Uint8Array(buf, head + pad + n * 4, n);
   const strokes = [];
   let k = 0;
-  for (const [c, w, t, o, cnt, of, og] of meta) {
+  for (const [c, w, t, o, cnt, of, og, kind, b] of meta) {
     const p = new Float32Array(cnt * 3);
     for (let i = 0; i < cnt; i++, k++) {
       p[i * 3] = xy[k * 2] / Q;
@@ -483,6 +486,8 @@ export async function decodePage(ab) {
     if (o !== null && o !== undefined) st.o = o;
     if (of !== null && of !== undefined) st.of = of;
     if (og !== null && og !== undefined) st.og = og;
+    if (kind === 'f') st.k = 'f';
+    if (kind === 'x') { st.x = 1; st.b = b || 0; }
     strokes.push(st);
   }
   return strokes;
