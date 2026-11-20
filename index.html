@@ -19,7 +19,7 @@
 <!-- Dropbox連携の共通ライブラリ(無改造で利用)。読み込めなければローカルのみで動く -->
 <link rel="stylesheet" href="https://moyorieki.github.io/storage-bridge/storage-bridge.css">
 <script src="https://moyorieki.github.io/storage-bridge/storage-bridge.js"></script>
-<link rel="stylesheet" href="css/app.css?v=24">
+<link rel="stylesheet" href="css/app.css?v=25">
 <title>ネームビルダー</title>
 </head>
 <body>
@@ -140,6 +140,8 @@
   </div>
   <label class="row col">大きさ <span><output id="eraserSizeOut"></output> px</span>
     <input id="eraserSize" type="range" min="6" max="300" step="2"></label>
+  <label class="row"><input id="eraseAll" type="checkbox"> 全部のレイヤーを消す</label>
+  <p class="muted small"><span id="eraseLayerNote"></span><br>オフのときは、直前に使ったペンのレイヤーだけ消す（ペン1〜3＝線画・バケツの塗り、文字ペン＝文字、塗りペン＝塗り）。消しゴムの円の色・ボタン左上の印が対象のレイヤー（灰＝線画／青＝文字／橙＝塗り）。画像は消しゴムでは消えない</p>
   <div class="actions"><button class="btn" type="button" data-close>閉じる</button></div>
 </dialog>
 
@@ -161,6 +163,8 @@
     <label><input type="radio" name="selMode" value="lasso"> 投げ縄</label>
     <label><input type="radio" name="selMode" value="rect"> 四角</label>
   </div>
+  <label class="row"><input id="selAll" type="checkbox"> 全部のレイヤーから選ぶ</label>
+  <p class="muted small"><span id="selLayerNote"></span><br>オフのときは、直前に使ったペンのレイヤーの線だけ選ぶ（移動ツールも同じ）。コマとセリフをまとめて動かすときはオンにする</p>
   <p class="muted small">囲んだ中に半分以上入っている線を選ぶ。囲まずにタップすると、その線を1本選ぶ。<br>選んだ後は、枠の中をドラッグで移動・右下の丸で拡大縮小・枠の外をタップで解除。</p>
   <div class="actions"><button class="btn" type="button" data-close>閉じる</button></div>
 </dialog>
@@ -346,6 +350,6 @@
 </script>
 <!-- 版番号(?v=)は css/js を変えるたびに index.html と js/app.js の両方で上げる。
      新旧のファイルが混ざって読み込みに失敗するのを防ぐため -->
-<script type="module" src="js/app.js?v=24"></script>
+<script type="module" src="js/app.js?v=25"></script>
 </body>
 </html>

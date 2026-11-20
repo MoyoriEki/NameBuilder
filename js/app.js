@@ -6,13 +6,13 @@
    - 描画中の線だけは重ねキャンバス(#live)に描き、
      ペンを離したらページのキャッシュへ焼き込む
    ============================================================ */
-import * as db from './db.js?v=24';
+import * as db from './db.js?v=25';
 import { drawStroke, drawStrokes, addStrokes, drawLiveStroke, isOpacityStroke, opacityAt, bbox, bboxHit, hitStroke, eraseSplit, sweep,
   fractionInPoly, topStrokeAt, unionBox, transformStroke, pointInPoly, strokePath,
-  ensureImages, setImageReady, makeImage } from './ink.js?v=24';
-import { bucketFill, polygonFill, subtractCircles } from './fill.js?v=24';
-import { pngWithDpi, makeZip } from './zip.js?v=24';
-import * as cloud from './cloud.js?v=24';
+  ensureImages, setImageReady, makeImage } from './ink.js?v=25';
+import { bucketFill, polygonFill, subtractCircles } from './fill.js?v=25';
+import { pngWithDpi, makeZip } from './zip.js?v=25';
+import * as cloud from './cloud.js?v=25';
 
 const PAGE_W = 2508, PAGE_H = 3541, DPI = 350;
 const GAP = 140;                 // ページ間の隙間(page-px)
@@ -42,6 +42,8 @@ const DEFAULTS = {
   underPen: { c: '#c4c9ce', w: 40, pr: false },    // 塗りペン(オートレイヤー: いつも一番下)
   fill: { c: '#1f2328', e: 2 },                   // 塗りつぶし。e = はみ出し(線の下へ広げる px)
   eraserMode: 'part',
+  eraseAll: false,    // 消しゴム: true=全部のレイヤー / false=直前に使ったペンのレイヤーだけ
+  selAll: false,      // 範囲選択・移動: true=全部のレイヤー / false=直前に使ったペンのレイヤーだけ
   eraserSize: 40,
   selMode: 'lasso',   // 選択ツール: lasso=投げ縄 / rect=四角
   stab: 0.3,
@@ -69,6 +71,8 @@ const settings = (() => {
   if (!Array.isArray(s.pens) || s.pens.length !== 3) s.pens = structuredClone(DEFAULTS.pens);
   s.textPen = { ...DEFAULTS.textPen, ...s.textPen };
   s.underPen = { ...DEFAULTS.underPen, ...s.underPen };
+  // 直前に使ったペン(消しゴム・選択の対象レイヤーを決める)
+  if (!/^pen[0-4]$/.test(s.lastPen || '')) s.lastPen = /^pen[0-4]$/.test(s.tool) ? s.tool : 'pen0';
   s.fill = { ...DEFAULTS.fill, ...s.fill };
   return s;
 })();
@@ -615,16 +619,18 @@ function drawLive() {
     if (settings.lowLatency) inkCv.style.visibility = 'visible';
   }
   drawSelOverlay(ctx);
-  if (cursor && (erasing || isEraserTool())) {
+  if (cursor) {
+    // 消しゴムの円。色で消す対象のレイヤーが分かる
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     const r = (settings.eraserSize / 2) * cam.z;
+    const L = LAYERS[eraseLayer() || 'all'];
     ctx.beginPath();
     ctx.arc(cursor.x, cursor.y, Math.max(2, r), 0, Math.PI * 2);
-    ctx.lineWidth = 1.5;
+    ctx.lineWidth = 3;
     ctx.strokeStyle = 'rgba(255,255,255,0.9)';
     ctx.stroke();
-    ctx.lineWidth = 1;
-    ctx.strokeStyle = 'rgba(40,50,60,0.8)';
+    ctx.lineWidth = 1.5;
+    ctx.strokeStyle = L.ring;
     ctx.stroke();
   }
 }
@@ -784,6 +790,31 @@ let inertia = null;
 
 const isEraserTool = () => settings.tool === 'eraser';
 const isSelTool = () => settings.tool === 'select' || settings.tool === 'move';
+
+/* ---- レイヤーごとの消しゴム・選択 ----
+   線はどのペンで描いたかで3つのレイヤーに分かれる: 塗りペン(u) / ふつう(線・塗り・画像)(n) / 文字ペン(x)。
+   消しゴムと範囲選択・移動は、直前に使ったペンのレイヤーだけを相手にする(設定で「全部」にもできる)。
+   文字を書いた後にサイドボタンで消すと文字だけ消え、下の線画は削れない */
+const LAYERS = {
+  n: { label: '線', name: '線画', ring: 'rgba(40,50,60,0.85)', chip: '#3d444b' },
+  x: { label: '文', name: '文字', ring: '#3b78d8', chip: '#3b78d8' },
+  u: { label: '塗', name: '塗り', ring: '#c27c0e', chip: '#c27c0e' },
+  all: { label: '全', name: '全部', ring: 'rgba(40,50,60,0.85)', chip: '#7a8288' },
+};
+const layerOf = (st) => (st.u ? 'u' : st.x ? 'x' : 'n');
+/** 直前に使ったペンのレイヤー */
+const penLayer = () => {
+  const i = Number(String(settings.lastPen).replace('pen', '')) || 0;
+  return i === 3 ? 'x' : i === 4 ? 'u' : 'n';
+};
+/** 消しゴムで消すレイヤー(null = 全部) */
+const eraseLayer = () => (settings.eraseAll ? null : penLayer());
+/** 範囲選択・移動で選べる線 */
+function selTargets(strokes) {
+  if (settings.selAll) return strokes;
+  const L = penLayer();
+  return strokes.filter((st) => layerOf(st) === L);
+}
 const penIndex = () => Number(settings.tool.replace('pen', '')) || 0;
 const TEXT_PEN = 3;  // 文字ペンはペン番号3として扱う(tool = 'pen3')
 const UNDER_PEN = 4; // 塗りペンはペン番号4(tool = 'pen4')
@@ -949,12 +980,14 @@ function eraseAt(wx, wy, r) {
   if (!ps.strokes) return;
   const x = wx, y = hit.y;
   const part = settings.eraserMode === 'part';
+  const only = eraseLayer();
   let changed = false;
   let region = null;
   const out = [];
   let cut = null;
   for (const st of ps.strokes) {
     if (st.k === 'i') { out.push(st); continue; } // 画像は消しゴムでは消さない(選択して削除)
+    if (only && layerOf(st) !== only) { out.push(st); continue; } // 対象でないレイヤーは消さない
     if (part && st.k === 'f') {
       // 塗りはここでは配列から外さず、当たった円を覚えておく(見た目は applyCuts で抜く)
       if (hitStroke(st, x, y, r)) {
@@ -1142,7 +1175,7 @@ function startSelTool(e) {
   if (!ps.strokes) { ensureLoaded(hit.id); return false; }
   clearSel();
   if (settings.tool === 'move') {
-    const st = topStrokeAt(ps.strokes, hit.x, hit.y, SEL_PICK / cam.z);
+    const st = topStrokeAt(selTargets(ps.strokes), hit.x, hit.y, SEL_PICK / cam.z);
     if (st) { setSel(hit.id, hit.top, [st]); selOp = { ...base, kind: 'move', w0: [wx, wy] }; }
     else selOp = { ...base, kind: 'none' };
     return true;
@@ -1209,14 +1242,14 @@ function finishLasso(o) {
   if (!o.moved) {
     // 囲まずにタップ → その位置の線を1本選ぶ
     const [x, y] = o.pts[0];
-    const st = topStrokeAt(ps.strokes, x, y, SEL_PICK / cam.z);
+    const st = topStrokeAt(selTargets(ps.strokes), x, y, SEL_PICK / cam.z);
     if (st) setSel(o.pageId, o.top, [st]);
     return;
   }
   const poly = o.kind === 'rect' ? rectPoly(o.pts[0], o.pts[1] || o.pts[0]) : o.pts;
   if (poly.length < 3) return;
   const pb = polyBox(poly);
-  const picked = ps.strokes.filter((st) => fractionInPoly(st, poly, pb) >= 0.5);
+  const picked = selTargets(ps.strokes).filter((st) => fractionInPoly(st, poly, pb) >= 0.5);
   // 線が無くても、囲んだ範囲は選択として残す(塗りつぶしに使える)
   setSel(o.pageId, o.top, picked, poly.map((q) => q.slice()));
 }
@@ -1779,7 +1812,7 @@ window.addEventListener('keydown', (e) => {
   else if (k === 't') selectTool('pen' + TEXT_PEN);
   else if (k === 'u') selectTool('pen' + UNDER_PEN);
   else if (k === '1' || k === '2' || k === '3') selectTool('pen' + (Number(k) - 1));
-  else if (k === 'b' || k === 'p') selectTool('pen' + penIndex());
+  else if (k === 'b' || k === 'p') selectTool(settings.lastPen);
   else if (e.key === 'PageDown') goNext();
   else if (e.key === 'PageUp') goPrev();
   else if (e.key === 'ArrowLeft') flipTo(-1);
@@ -1789,7 +1822,15 @@ window.addEventListener('keydown', (e) => {
 /* ============================================================
    道具ドック
    ============================================================ */
-let lastPenTool = settings.tool.startsWith('pen') ? settings.tool : 'pen0';
+/** 道具ボタンの左上に、相手にするレイヤーの印を付ける */
+function setLayerChip(btn, key) {
+  let chip = btn.querySelector('.layer-chip');
+  if (!chip) { chip = document.createElement('span'); chip.className = 'layer-chip'; btn.appendChild(chip); }
+  const L = LAYERS[key];
+  chip.textContent = L.label;
+  chip.style.background = L.chip;
+  chip.title = `対象: ${L.name}`;
+}
 function renderDock() {
   const box = $('penSlots');
   box.innerHTML = '';
@@ -1817,7 +1858,10 @@ function renderDock() {
   eb.classList.toggle('active', isEraserTool());
   let badge = eb.querySelector('.mode-badge');
   if (!badge) { badge = document.createElement('span'); badge.className = 'mode-badge'; eb.appendChild(badge); }
-  badge.textContent = settings.eraserMode === 'part' ? '部分' : '線';
+  badge.textContent = settings.eraserMode === 'part' ? '部分' : '線ごと';
+  setLayerChip(eb, eraseLayer() || 'all');
+  setLayerChip($('moveBtn'), settings.selAll ? 'all' : penLayer());
+  setLayerChip($('selectBtn'), settings.selAll ? 'all' : penLayer());
   $('moveBtn').classList.toggle('active', settings.tool === 'move');
   const sb = $('selectBtn');
   sb.classList.toggle('active', settings.tool === 'select');
@@ -1837,7 +1881,7 @@ function renderDock() {
 }
 function selectTool(t) {
   settings.tool = t;
-  if (t.startsWith('pen')) lastPenTool = t;
+  if (t.startsWith('pen')) settings.lastPen = t;
   if (t !== 'select' && t !== 'move' && t !== 'fill') clearSel();
   saveSettings();
   renderDock();
@@ -2052,9 +2096,18 @@ $('penTestClear').addEventListener('click', () => { testStrokes = []; drawPenPre
 /* ---- 消しゴム設定 ---- */
 function openEraserDialog() {
   for (const r of document.querySelectorAll('input[name=eraserMode]')) r.checked = r.value === settings.eraserMode;
+  $('eraseAll').checked = settings.eraseAll;
+  syncLayerNote();
   $('eraserSize').value = settings.eraserSize;
   $('eraserSizeOut').textContent = settings.eraserSize;
   $('eraserDlg').showModal();
+}
+$('eraseAll').addEventListener('change', (e) => { settings.eraseAll = e.target.checked; saveSettings(); renderDock(); syncLayerNote(); });
+$('selAll').addEventListener('change', (e) => { settings.selAll = e.target.checked; saveSettings(); renderDock(); syncLayerNote(); });
+function syncLayerNote() {
+  const name = LAYERS[penLayer()].name;
+  $('eraseLayerNote').textContent = settings.eraseAll ? '今は全部のレイヤーを消す' : `今は「${name}」のレイヤーだけ消す（直前に使ったペンで決まる）`;
+  $('selLayerNote').textContent = settings.selAll ? '今は全部のレイヤーから選ぶ' : `今は「${name}」のレイヤーだけ選ぶ（直前に使ったペンで決まる）`;
 }
 for (const r of document.querySelectorAll('input[name=eraserMode]')) {
   r.addEventListener('change', () => { settings.eraserMode = r.value; saveSettings(); renderDock(); });
@@ -2099,6 +2152,8 @@ $('fillExpand').addEventListener('input', (e) => {
 /* ---- 範囲選択の設定 ---- */
 function openSelectDialog() {
   for (const r of document.querySelectorAll('input[name=selMode]')) r.checked = r.value === settings.selMode;
+  $('selAll').checked = settings.selAll;
+  syncLayerNote();
   $('selectDlg').showModal();
 }
 for (const r of document.querySelectorAll('input[name=selMode]')) {
