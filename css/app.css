@@ -296,6 +296,9 @@ input[type=checkbox], input[type=radio] { width: 18px; height: 18px; accent-colo
 
 /* 消しゴム・選択・移動が相手にするレイヤーの印(ボタンの左上) */
 .layer-chip {
-  position: absolute; left: 2px; top: 2px; min-width: 15px; height: 15px; padding: 0 2px; border-radius: 4px;
-  font-size: 10px; line-height: 15px; font-weight: 700; color: #fff; text-align: center; pointer-events: none;
+  position: absolute; left: 1px; top: 1px; min-width: 18px; height: 18px; padding: 0 2px; border-radius: 5px;
+  font-size: 11px; line-height: 18px; font-weight: 700; color: #fff; text-align: center; cursor: pointer;
 }
+/* 指でも押しやすいよう、当たりを見た目より広げる */
+.layer-chip::before { content: ''; position: absolute; inset: -6px -8px -8px -6px; }
+.layer-chip.auto { outline: 1.5px dashed #fff; outline-offset: -3px; }
