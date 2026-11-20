@@ -801,7 +801,7 @@ const LAYERS = {
   u: { label: '塗', name: '塗り', ring: '#c27c0e', chip: '#c27c0e' },
   all: { label: '全', name: '全部', ring: 'rgba(40,50,60,0.85)', chip: '#7a8288' },
 };
-const TARGETS = ['all', 'n', 'x', 'u', 'auto']; // 印をタップしたときの切り替え順
+const TARGETS = ['all', 'n', 'u', 'x']; // 印をタップしたときの切り替え順(直前のペンは設定ダイアログからだけ選べる)
 const layerOf = (st) => (st.u ? 'u' : st.x ? 'x' : 'n');
 /** 直前に使ったペンのレイヤー */
 const penLayer = () => {
@@ -1835,7 +1835,7 @@ function setLayerChip(btn, target) {
   chip.classList.toggle('auto', target === 'auto'); // 直前のペンに合わせているときは点線で囲む
   chip.title = `対象: ${targetName(target)}（タップで切り替え）`;
 }
-/** 印をタップ: 対象のレイヤーを 全部→線画→文字→塗り→直前のペン→… と切り替える */
+/** 印をタップ: 対象のレイヤーを 全部→線画→塗り→文字→全部… と切り替える */
 function cycleTarget(key, what) {
   const i = TARGETS.indexOf(settings[key]);
   settings[key] = TARGETS[(i + 1) % TARGETS.length];

@@ -299,6 +299,6 @@ input[type=checkbox], input[type=radio] { width: 18px; height: 18px; accent-colo
   position: absolute; left: 1px; top: 1px; min-width: 18px; height: 18px; padding: 0 2px; border-radius: 5px;
   font-size: 11px; line-height: 18px; font-weight: 700; color: #fff; text-align: center; cursor: pointer;
 }
-/* 指でも押しやすいよう、当たりを見た目より広げる */
-.layer-chip::before { content: ''; position: absolute; inset: -6px -8px -8px -6px; }
+/* 当たりはボタンの外側(左上)へだけ広げる。内側へ広げるとボタンの真ん中を押したときに切り替わってしまう */
+.layer-chip::before { content: ''; position: absolute; inset: -6px 0 0 -6px; }
 .layer-chip.auto { outline: 1.5px dashed #fff; outline-offset: -3px; }

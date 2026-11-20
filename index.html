@@ -144,11 +144,11 @@
   <div class="seg">
     <label><input type="radio" name="eraseTarget" value="all"> 全部</label>
     <label><input type="radio" name="eraseTarget" value="n"> 線画</label>
-    <label><input type="radio" name="eraseTarget" value="x"> 文字</label>
     <label><input type="radio" name="eraseTarget" value="u"> 塗り</label>
+    <label><input type="radio" name="eraseTarget" value="x"> 文字</label>
     <label><input type="radio" name="eraseTarget" value="auto"> 直前のペン <span id="eraseAutoNote" class="muted small"></span></label>
   </div>
-  <p class="muted small">線画＝ペン1〜3とバケツの塗り、文字＝文字ペン、塗り＝塗りペン。ボタン左上の印をタップしても切り替えられる（灰「線」／青「文」／橙「塗」／「全」。点線で囲んだ印は直前のペンに合わせている）。消しゴムの円の色も対象のレイヤーの色になる。画像は消しゴムでは消えない</p>
+  <p class="muted small">線画＝ペン1〜3とバケツの塗り、文字＝文字ペン、塗り＝塗りペン。ボタン左上の印をタップしても切り替えられる（全部→線画→塗り→文字の順。灰「線」／橙「塗」／青「文」／「全」。点線で囲んだ印は直前のペンに合わせている）。消しゴムの円の色も対象のレイヤーの色になる。画像は消しゴムでは消えない</p>
   <div class="actions"><button class="btn" type="button" data-close>閉じる</button></div>
 </dialog>
 
@@ -174,11 +174,11 @@
   <div class="seg">
     <label><input type="radio" name="selTarget" value="all"> 全部</label>
     <label><input type="radio" name="selTarget" value="n"> 線画</label>
-    <label><input type="radio" name="selTarget" value="x"> 文字</label>
     <label><input type="radio" name="selTarget" value="u"> 塗り</label>
+    <label><input type="radio" name="selTarget" value="x"> 文字</label>
     <label><input type="radio" name="selTarget" value="auto"> 直前のペン <span id="selAutoNote" class="muted small"></span></label>
   </div>
-  <p class="muted small">ボタン左上の印をタップしても切り替えられる。コマとセリフをまとめて動かすときは「全部」</p>
+  <p class="muted small">ボタン左上の印をタップしても切り替えられる（全部→線画→塗り→文字の順）。コマとセリフをまとめて動かすときは「全部」</p>
   <p class="muted small">囲んだ中に半分以上入っている線を選ぶ。囲まずにタップすると、その線を1本選ぶ。<br>選んだ後は、枠の中をドラッグで移動・右下の丸で拡大縮小・枠の外をタップで解除。</p>
   <div class="actions"><button class="btn" type="button" data-close>閉じる</button></div>
 </dialog>
