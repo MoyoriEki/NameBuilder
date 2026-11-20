@@ -5,7 +5,7 @@
    - 範囲(マスク)の輪郭をたどってベクターの多角形にし、点を間引いて「塗り」として保存する
      (線と同じく、選択して移動・拡大縮小・undo・同期ができる)
    ============================================================ */
-import { drawStrokes, makeFill, fillPath } from './ink.js?v=23';
+import { drawStrokes, makeFill, fillPath } from './ink.js?v=24';
 
 const TOL = 24; // タップした色との差がこれ以内なら同じ色とみなす(0..255)
 
@@ -20,7 +20,7 @@ function release() {
   if (refCanvas) refCanvas.width = refCanvas.height = 0;
 }
 
-/** バケツ: strokes(文字ペンの線は見ない)を背景白で描き、(x,y) から塗る範囲を求める。
+/** バケツ: strokes(文字ペン・塗りペンの線は見ない)を背景白で描き、(x,y) から塗る範囲を求める。
  *  戻り値は塗りのストローク(範囲が無ければ null) */
 export function bucketFill(strokes, W, H, x, y, color, expand) {
   x = Math.floor(x); y = Math.floor(y);
@@ -30,7 +30,7 @@ export function bucketFill(strokes, W, H, x, y, color, expand) {
   ctx.setTransform(1, 0, 0, 1, 0, 0);
   ctx.fillStyle = '#fff';
   ctx.fillRect(0, 0, W, H);
-  drawStrokes(ctx, strokes.filter((s) => !s.x));
+  drawStrokes(ctx, strokes.filter((s) => !s.x && !s.u)); // 文字ペン・塗りペンは見ない(線画だけで範囲を決める)
   const data = ctx.getImageData(0, 0, W, H).data;
   release();
   // 同じ色の範囲(4近傍のスキャンライン塗り)

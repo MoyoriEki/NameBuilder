@@ -12,7 +12,7 @@
    - 競合(同じ作品を両方の端末で変えた): どちらも捨てない。
      Dropbox側の版を「（別端末の版）」として別作品に取り込み、こちらの版で上書きする
    ============================================================ */
-import * as db from './db.js?v=23';
+import * as db from './db.js?v=24';
 
 const BASE = '/NameBuilder';
 const PREFIX = 'namebuilder';
@@ -412,8 +412,8 @@ function uid(p) {
 
 /* ============================================================
    ページの線データの符号化(Dropbox用)
-   'NBP1' | u32 メタJSON長 | メタJSON([[色,太さ,筆圧の効き,濃さ|null,点数(, 真っ黒の筆圧, 濃さのカーブ(, 種類 'f'|'x', フチ))], …]) | 0埋め(偶数へ)
-   | Int16 x,y(1/8 px 単位) × 点数 | Uint8 筆圧(0..255) × 点数
+   'NBP1' | u32 メタJSON長 | メタJSON([[色,太さ,筆圧の効き,濃さ|null,点数(, 真っ黒の筆圧, 濃さのカーブ(, 種類 'f'|'x'|'u'|'i', フチ(, 画像のバイト数, 画像の形式)))], …]) | 0埋め(偶数へ)
+   | Int16 x,y(1/8 px 単位) × 点数 | Uint8 筆圧(0..255) × 点数 | 画像のバイト列(画像があれば、出てくる順に)
    これ全体を gzip して 'NBZ1' を前に付ける(CompressionStream が無い環境では生のまま)
    ============================================================ */
 const Q = 8;
@@ -421,20 +421,23 @@ const MAGIC_RAW = 0x3150424e; // 'NBP1' (little endian)
 const MAGIC_GZ = 0x315a424e;  // 'NBZ1'
 
 export async function encodePage(strokes) {
+  const imgs = await Promise.all(strokes.map((s) => (s.k === 'i' && s.img ? s.img.arrayBuffer() : null)));
   // 6・7番目(真っ黒になる筆圧・濃さのカーブ)は後から足した。古い版は読み飛ばすだけなので互換
-  const meta = strokes.map((s) => {
+  const meta = strokes.map((s, i) => {
     const m = [s.c, s.w, s.t, s.o ?? null, s.p.length / 3];
-    // 8・9番目(種類 'f'=塗り/'x'=文字ペン・文字ペンのフチ)も後から足した
-    const kind = s.k === 'f' ? 'f' : s.x ? 'x' : null;
+    // 8・9番目(種類 'f'=塗り/'x'=文字ペン/'u'=塗りペン/'i'=画像・文字ペンのフチ)、10・11番目(画像)も後から足した
+    const kind = s.k === 'f' ? 'f' : s.k === 'i' ? 'i' : s.x ? 'x' : s.u ? 'u' : null;
     if (s.of !== undefined || s.og !== undefined || kind) m.push(s.of ?? null, s.og ?? null);
     if (kind) m.push(kind, s.b ?? 0);
+    if (kind === 'i') m.push(imgs[i]?.byteLength || 0, s.img?.type || 'image/webp');
     return m;
   });
+  const imgBytes = imgs.reduce((a, b) => a + (b ? b.byteLength : 0), 0);
   const metaBytes = new TextEncoder().encode(JSON.stringify(meta));
   const n = strokes.reduce((a, s) => a + s.p.length / 3, 0);
   const head = 8 + metaBytes.length;
   const pad = head % 2;
-  const buf = new ArrayBuffer(head + pad + n * 4 + n);
+  const buf = new ArrayBuffer(head + pad + n * 4 + n + imgBytes);
   const dv = new DataView(buf);
   dv.setUint32(0, MAGIC_RAW, true);
   dv.setUint32(4, metaBytes.length, true);
@@ -450,6 +453,8 @@ export async function encodePage(strokes) {
       pr[k] = Math.max(0, Math.min(255, Math.round(p[i + 2] * 255)));
     }
   }
+  let off = head + pad + n * 5;
+  for (const b of imgs) if (b) { new Uint8Array(buf, off, b.byteLength).set(new Uint8Array(b)); off += b.byteLength; }
   if (typeof CompressionStream === 'function') {
     const gz = await new Response(new Blob([buf]).stream().pipeThrough(new CompressionStream('gzip'))).arrayBuffer();
     const out = new Uint8Array(4 + gz.byteLength);
@@ -475,7 +480,8 @@ export async function decodePage(ab) {
   const pr = new Uint8Array(buf, head + pad + n * 4, n);
   const strokes = [];
   let k = 0;
-  for (const [c, w, t, o, cnt, of, og, kind, b] of meta) {
+  let off = head + pad + n * 5;
+  for (const [c, w, t, o, cnt, of, og, kind, b, ilen, itype] of meta) {
     const p = new Float32Array(cnt * 3);
     for (let i = 0; i < cnt; i++, k++) {
       p[i * 3] = xy[k * 2] / Q;
@@ -488,6 +494,12 @@ export async function decodePage(ab) {
     if (og !== null && og !== undefined) st.og = og;
     if (kind === 'f') st.k = 'f';
     if (kind === 'x') { st.x = 1; st.b = b || 0; }
+    if (kind === 'u') st.u = 1;
+    if (kind === 'i') {
+      st.k = 'i';
+      st.img = new Blob([buf.slice(off, off + ilen)], { type: itype || 'image/webp' });
+      off += ilen;
+    }
     strokes.push(st);
   }
   return strokes;

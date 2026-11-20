@@ -6,12 +6,13 @@
    - 描画中の線だけは重ねキャンバス(#live)に描き、
      ペンを離したらページのキャッシュへ焼き込む
    ============================================================ */
-import * as db from './db.js?v=23';
+import * as db from './db.js?v=24';
 import { drawStroke, drawStrokes, addStrokes, drawLiveStroke, isOpacityStroke, opacityAt, bbox, bboxHit, hitStroke, eraseSplit, sweep,
-  fractionInPoly, topStrokeAt, unionBox, transformStroke, pointInPoly, strokePath } from './ink.js?v=23';
-import { bucketFill, polygonFill, subtractCircles } from './fill.js?v=23';
-import { pngWithDpi, makeZip } from './zip.js?v=23';
-import * as cloud from './cloud.js?v=23';
+  fractionInPoly, topStrokeAt, unionBox, transformStroke, pointInPoly, strokePath,
+  ensureImages, setImageReady, makeImage } from './ink.js?v=24';
+import { bucketFill, polygonFill, subtractCircles } from './fill.js?v=24';
+import { pngWithDpi, makeZip } from './zip.js?v=24';
+import * as cloud from './cloud.js?v=24';
 
 const PAGE_W = 2508, PAGE_H = 3541, DPI = 350;
 const GAP = 140;                 // ページ間の隙間(page-px)
@@ -38,6 +39,7 @@ const DEFAULTS = {
   ],
   tool: 'pen0',
   textPen: { c: '#1f2328', w: 6, pr: true, b: 8 }, // 文字ペン(オートレイヤー)。b = フチの太さ(page-px)
+  underPen: { c: '#c4c9ce', w: 40, pr: false },    // 塗りペン(オートレイヤー: いつも一番下)
   fill: { c: '#1f2328', e: 2 },                   // 塗りつぶし。e = はみ出し(線の下へ広げる px)
   eraserMode: 'part',
   eraserSize: 40,
@@ -66,6 +68,7 @@ const settings = (() => {
   s = { ...DEFAULTS, ...s };
   if (!Array.isArray(s.pens) || s.pens.length !== 3) s.pens = structuredClone(DEFAULTS.pens);
   s.textPen = { ...DEFAULTS.textPen, ...s.textPen };
+  s.underPen = { ...DEFAULTS.underPen, ...s.underPen };
   s.fill = { ...DEFAULTS.fill, ...s.fill };
   return s;
 })();
@@ -116,6 +119,14 @@ function pageState(id) {
   if (!ps) { ps = { strokes: null, loading: null, rev: 0 }; E.pages.set(id, ps); }
   return ps;
 }
+/** 画像の読み込み(デコード)が終わったら、画像のあるページを描き直す */
+setImageReady(() => {
+  if (!E) return;
+  for (const ps of E.pages.values()) {
+    if (ps.strokes?.some((st) => st.k === 'i')) ps.rev++;
+  }
+  requestRender();
+});
 function ensureLoaded(id) {
   const ps = pageState(id);
   if (ps.strokes || ps.loading) return;
@@ -592,6 +603,14 @@ function drawLive() {
       for (const st of pageState(drawing.pageId).strokes || []) if (st.x) drawStroke(tctx, st);
     } : null;
     drawLiveStroke(tctx, drawing.st, pts, false, under);
+    // 塗りペン: 描いている線の上に、その辺りのほかの線を描き直す(離す前から線画の下に見える)
+    if (drawing.st.u) {
+      let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+      for (const q of pts) { x0 = Math.min(x0, q[0]); y0 = Math.min(y0, q[1]); x1 = Math.max(x1, q[0]); y1 = Math.max(y1, q[1]); }
+      const r = drawing.st.w;
+      const over = (pageState(drawing.pageId).strokes || []).filter((st) => !st.u && bboxHit(bbox(st), x0 - r, y0 - r, x1 + r, y1 + r));
+      if (over.length) drawStrokes(tctx, over);
+    }
     tctx.restore();
     if (settings.lowLatency) inkCv.style.visibility = 'visible';
   }
@@ -739,7 +758,8 @@ async function flushSave() {
 
 const THUMB_W = 200, THUMB_H = Math.round((THUMB_W * PAGE_H) / PAGE_W);
 /** サムネイル。縮小すると細い線が消えかかるので、輪郭を少し太らせて描く */
-function makeThumb(id, ps) {
+async function makeThumb(id, ps) {
+  await ensureImages(ps.strokes);
   const cv = document.createElement('canvas');
   cv.width = THUMB_W; cv.height = THUMB_H;
   const ctx = cv.getContext('2d');
@@ -765,8 +785,9 @@ let inertia = null;
 const isEraserTool = () => settings.tool === 'eraser';
 const isSelTool = () => settings.tool === 'select' || settings.tool === 'move';
 const penIndex = () => Number(settings.tool.replace('pen', '')) || 0;
-const TEXT_PEN = 3; // 文字ペンはペン番号3として扱う(tool = 'pen3')
-const penOf = (i) => (i === TEXT_PEN ? settings.textPen : settings.pens[i]);
+const TEXT_PEN = 3;  // 文字ペンはペン番号3として扱う(tool = 'pen3')
+const UNDER_PEN = 4; // 塗りペンはペン番号4(tool = 'pen4')
+const penOf = (i) => (i === TEXT_PEN ? settings.textPen : i === UNDER_PEN ? settings.underPen : settings.pens[i]);
 
 function toWorld(e) {
   return [cam.x + e.clientX / cam.z, cam.y + e.clientY / cam.z];
@@ -796,6 +817,7 @@ const OPACITY_DEFAULTS = { omin: 0.15, ofull: 0.55, ogamma: 0.7 };
 function penStroke(pen) {
   const st = { c: pen.c, w: pen.w, t: pen.pr ? PEN_THINNING : 0 };
   if (pen === settings.textPen) { st.x = 1; st.b = pen.b; return st; }
+  if (pen === settings.underPen) { st.u = 1; return st; }
   if (pen.op && !isWhite(pen.c)) {
     st.o = pen.omin ?? OPACITY_DEFAULTS.omin;
     st.of = pen.ofull ?? OPACITY_DEFAULTS.ofull;
@@ -932,6 +954,7 @@ function eraseAt(wx, wy, r) {
   const out = [];
   let cut = null;
   for (const st of ps.strokes) {
+    if (st.k === 'i') { out.push(st); continue; } // 画像は消しゴムでは消さない(選択して削除)
     if (part && st.k === 'f') {
       // 塗りはここでは配列から外さず、当たった円を覚えておく(見た目は applyCuts で抜く)
       if (hitStroke(st, x, y, r)) {
@@ -1246,9 +1269,9 @@ function duplicateSel() {
 /* ---- 塗りつぶし ----
    タップした所を、線で囲まれた範囲ごと塗る(文字ペンの線は見ない。塗りは文字の下に入る)。
    投げ縄・四角の選択があり、その中をタップしたときは、線に関係なく選択範囲を塗る */
-function addToPage(pageId, news) {
+function addToPage(pageId, news, bottom = false) {
   const before = pageState(pageId).strokes;
-  const after = addStrokes(before, news);
+  const after = addStrokes(before, news, bottom);
   if (!setPageStrokes(pageId, after)) return false;
   pushHistory([{ pageId, before, after }]);
   requestRender();
@@ -1269,14 +1292,17 @@ function startFillTool(e) {
   selOp = { id: e.pointerId, kind: 'fill', sx: e.clientX, sy: e.clientY, cx: e.clientX, cy: e.clientY, moved: false, w0: [wx, wy] };
   return true;
 }
-function doFill(wx, wy) {
+async function doFill(wx, wy) {
   const hit = pageAt(wx, wy);
   if (sel?.poly && !sel.lift && hit?.id === sel.pageId && pointInPoly(hit.x, hit.y, sel.poly)) { fillSel(); return; }
   clearSel();
   if (!hit || !hit.inside) return;
   const ps = pageState(hit.id);
   if (!ps.strokes) { ensureLoaded(hit.id); return; }
-  const f = bucketFill(ps.strokes, PAGE_W, PAGE_H, hit.x, hit.y, settings.fill.c, settings.fill.e);
+  const strokes = ps.strokes;
+  await ensureImages(strokes); // 画像の線も境目として使う
+  if (ps.strokes !== strokes) return; // 待っている間に変わった
+  const f = bucketFill(strokes, PAGE_W, PAGE_H, hit.x, hit.y, settings.fill.c, settings.fill.e);
   if (f) addToPage(hit.id, [f]);
 }
 /** 投げ縄の線・選択枠・拡大縮小ハンドル・操作ボタン(drawLive から。ctx は重ねキャンバス) */
@@ -1344,7 +1370,7 @@ function drawSelOverlay(ctx) {
       show = true;
       const has = sel.strokes.length > 0;
       $('selFill').hidden = !sel.poly;
-      $('selDup').disabled = $('selDel').disabled = !has;
+      $('selDup').disabled = $('selDel').disabled = $('selFront').disabled = $('selBack').disabled = !has;
       placeSelBar(x0, y0, x1, y1);
     }
   }
@@ -1365,6 +1391,81 @@ function placeSelBar(x0, y0, x1, y1) {
 $('selDel').addEventListener('click', deleteSel);
 $('selDup').addEventListener('click', duplicateSel);
 $('selFill').addEventListener('click', fillSel);
+$('selFront').addEventListener('click', () => reorderSel(false));
+$('selBack').addEventListener('click', () => reorderSel(true));
+
+/** 選んだ線・画像を、ふつうの線の段のいちばん上(前面)/いちばん下(背面)へ。
+ *  塗りペン・文字ペンの線はそれぞれの段の中で動く */
+function reorderSel(back) {
+  if (!sel || selOp || !sel.strokes.length) return;
+  const { pageId } = sel;
+  const picked = new Set(sel.strokes);
+  const before = pageState(pageId).strokes;
+  const inOrder = before.filter((st) => picked.has(st));
+  const after = addStrokes(before.filter((st) => !picked.has(st)), inOrder, back);
+  if (after.every((st, i) => st === before[i])) return;
+  if (!setPageStrokes(pageId, after)) return;
+  pushHistory([{ pageId, before, after }]);
+  toast(back ? '背面へ移した' : '前面へ移した');
+  requestRender();
+}
+
+/* ---- 画像の取り込み ----
+   画像は作品のデータの中に持つ(元のファイルとは紐づけない。元を消しても・動かしても崩れない)。
+   大きすぎる画像はページの解像度(350dpi)より細かくても意味が無いので、長い辺 3541px までに縮める。
+   取り込んだらページに置いて選択状態にし、移動ツールでそのまま位置・大きさを決められる。
+   後からでも、選択すれば動かす・拡大縮小・前面/背面・削除ができる */
+const IMG_MAX = Math.max(PAGE_W, PAGE_H);
+async function importImage(file) {
+  if (!E || !file) return;
+  let bm;
+  try { bm = await createImageBitmap(file); } catch (_) { toast('この画像は読み込めない'); return; }
+  let w = bm.width, h = bm.height;
+  let blob = file;
+  const k = Math.min(1, IMG_MAX / Math.max(w, h));
+  if (k < 1 || !/^image\/(png|jpeg|webp)$/.test(file.type)) {
+    w = Math.max(1, Math.round(w * k)); h = Math.max(1, Math.round(h * k));
+    const cv = document.createElement('canvas');
+    cv.width = w; cv.height = h;
+    const ctx = cv.getContext('2d');
+    ctx.imageSmoothingQuality = 'high';
+    ctx.drawImage(bm, 0, 0, w, h);
+    blob = await new Promise((res) => cv.toBlob(res, 'image/webp', 0.92));
+    cv.width = cv.height = 0;
+  } else {
+    blob = new Blob([await file.arrayBuffer()], { type: file.type }); // File(元ファイルへの参照)ではなく中身を持つ
+  }
+  bm.close?.();
+  if (!blob) { toast('画像の変換に失敗した'); return; }
+  // 置く場所: 今見ているページの、画面に見えている部分の真ん中。ページの8割に収まる大きさ
+  const i = currentPage(), id = E.doc.pages[i];
+  const ps = pageState(id);
+  if (!ps.strokes) { ensureLoaded(id); toast('ページを読み込み中。もう一度試して'); return; }
+  const a = area();
+  const cx = clamp(cam.x + (a.x0 + a.x1) / 2 / cam.z, 0, PAGE_W);
+  const cy = clamp(cam.y + (a.y0 + a.y1) / 2 / cam.z - i * PITCH, 0, PAGE_H);
+  const s = Math.min((PAGE_W * 0.8) / w, (PAGE_H * 0.8) / h);
+  const iw = w * s, ih = h * s;
+  const x0 = clamp(cx - iw / 2, 0, PAGE_W - iw), y0 = clamp(cy - ih / 2, 0, PAGE_H - ih);
+  const st = makeImage(blob, x0, y0, x0 + iw, y0 + ih);
+  selectTool('move');
+  // 線の下(ふつうの段のいちばん下)に置く。前に出したいときは選択して「前面」
+  if (!addToPage(id, [st], true)) return;
+  setSel(id, i * PITCH, [st]);
+  toast('画像を置いた。ドラッグで移動・右下の丸で大きさを変える');
+}
+$('imageBtn').addEventListener('click', () => $('imageFile').click());
+$('imageFile').addEventListener('change', (e) => {
+  const f = e.target.files?.[0];
+  e.target.value = '';
+  importImage(f);
+});
+// PCでは貼り付け(Ctrl+V)でも取り込める
+window.addEventListener('paste', (e) => {
+  if (!E || document.querySelector('dialog[open]')) return;
+  const f = [...(e.clipboardData?.files || [])].find((x) => x.type.startsWith('image/'));
+  if (f) { e.preventDefault(); importImage(f); }
+});
 $('selClear').addEventListener('click', clearSel);
 
 /** 消しゴムで塗りに当たった所を、表示の上だけ抜く(離すまでの見た目)。
@@ -1676,6 +1777,7 @@ window.addEventListener('keydown', (e) => {
   else if (k === 'l') selectTool('select');
   else if (k === 'g') selectTool('fill');
   else if (k === 't') selectTool('pen' + TEXT_PEN);
+  else if (k === 'u') selectTool('pen' + UNDER_PEN);
   else if (k === '1' || k === '2' || k === '3') selectTool('pen' + (Number(k) - 1));
   else if (k === 'b' || k === 'p') selectTool('pen' + penIndex());
   else if (e.key === 'PageDown') goNext();
@@ -1724,6 +1826,10 @@ function renderDock() {
   tb.classList.toggle('active', settings.tool === 'pen' + TEXT_PEN);
   tb.querySelector('.text-ico').style.color = settings.textPen.c;
   tb.querySelector('.mode-badge').textContent = `フチ${settings.textPen.b}`;
+  const ub = $('underPenBtn');
+  ub.classList.toggle('active', settings.tool === 'pen' + UNDER_PEN);
+  ub.querySelector('.under-ico').style.background = settings.underPen.c;
+  ub.querySelector('.pen-w').textContent = settings.underPen.w;
   const fb = $('fillBtn');
   fb.classList.toggle('active', settings.tool === 'fill');
   fb.querySelector('.fill-dot').style.background = settings.fill.c;
@@ -1742,6 +1848,10 @@ $('eraserBtn').addEventListener('click', () => {
   else selectTool('eraser');
 });
 $('moveBtn').addEventListener('click', () => selectTool('move'));
+$('underPenBtn').addEventListener('click', () => {
+  if (settings.tool === 'pen' + UNDER_PEN) openPenDialog(UNDER_PEN);
+  else selectTool('pen' + UNDER_PEN);
+});
 $('textPenBtn').addEventListener('click', () => {
   if (settings.tool === 'pen' + TEXT_PEN) openPenDialog(TEXT_PEN);
   else selectTool('pen' + TEXT_PEN);
@@ -1766,10 +1876,11 @@ let editingPen = 0;
 function openPenDialog(i) {
   editingPen = i;
   const p = penOf(i);
-  const text = i === TEXT_PEN;
-  $('penDlgTitle').textContent = text ? '文字ペン（いつも一番上に描く）' : 'ペン';
-  $('penOpacityRow').hidden = text;
+  const text = i === TEXT_PEN, under = i === UNDER_PEN;
+  $('penDlgTitle').textContent = text ? '文字ペン（いつも一番上に描く）' : under ? '塗りペン（いつも一番下に描く）' : 'ペン';
+  $('penOpacityRow').hidden = text || under;
   $('penBorderRow').hidden = !text;
+  $('penWidth').max = under ? 300 : 120;
   $('penBorder').value = settings.textPen.b;
   $('penBorderOut').textContent = settings.textPen.b;
   const sw = $('penColors');
@@ -1845,9 +1956,9 @@ $('penOpacityReset').addEventListener('click', () => {
 });
 function syncOpacityRow() {
   const p = penOf(editingPen);
-  const text = editingPen === TEXT_PEN;
-  $('penOpacityBox').hidden = !p.op || text;
-  $('penOpacityNote').hidden = !(p.op && isWhite(p.c)) || text;
+  const special = editingPen === TEXT_PEN || editingPen === UNDER_PEN;
+  $('penOpacityBox').hidden = !p.op || special;
+  $('penOpacityNote').hidden = !(p.op && isWhite(p.c)) || special;
 }
 /* ---- ペン設定の試し描き ----
    プレビュー欄にペンで描ける。点(位置と補正済みの筆圧)だけを覚えておき、描き直すたびに
@@ -2225,6 +2336,9 @@ function updatePgFoot() {
   $('pgSelAll').hidden = !pgSelectMode;
   $('pgDelSel').hidden = !pgSelectMode;
   $('pgAddEnd').hidden = pgSelectMode;
+  $('pgImport').hidden = pgSelectMode;
+  $('pgSendSel').hidden = !pgSelectMode;
+  $('pgSendSel').disabled = pgSelected.size === 0;
   $('pgDelSel').disabled = pgSelected.size === 0;
   $('pgDelSel').textContent = pgSelected.size ? `削除（${pgSelected.size}ページ）` : '削除';
   $('pageSelInfo').textContent = pgSelectMode
@@ -2311,6 +2425,175 @@ $('pgSelAll').addEventListener('click', () => {
   renderPageGrid();
 });
 $('pgDelSel').addEventListener('click', () => deletePagesAsk([...pgSelected]));
+$('pgImport').addEventListener('click', () => openXfer('import'));
+$('pgSendSel').addEventListener('click', () => { if (pgSelected.size) openXfer('send'); });
+
+/* ---- ほかのネームとのページのやりとり ----
+   取り込む: ほかのネームを選び、そのページを選んで、今のページの後ろへ写す(線・塗り・画像・文字もそのまま)
+   送る   : ページ一覧の「選択」で選んだページを、ほかのネーム(または新しいネーム)の最後へ写す
+   どちらも写しを作るだけで、元のネームは変わらない。写したページには新しいページIDを付ける */
+const xfer = { mode: '', src: null, picked: new Set(), urls: [] };
+function xferRevoke() { while (xfer.urls.length) URL.revokeObjectURL(xfer.urls.pop()); }
+function thumbInto(img, docId, pageId) {
+  db.getThumb(docId, pageId).then((b) => {
+    if (!b) return;
+    const u = URL.createObjectURL(b);
+    xfer.urls.push(u);
+    img.src = u;
+  });
+}
+function xferCard(label, sub, docId, pageId, onClick) {
+  const el = document.createElement('div');
+  el.className = 'pg';
+  const th = document.createElement('div');
+  th.className = 'pg-thumb';
+  const img = document.createElement('img');
+  img.alt = '';
+  img.draggable = false;
+  th.appendChild(img);
+  const check = document.createElement('span');
+  check.className = 'pg-check';
+  th.appendChild(check);
+  if (pageId) thumbInto(img, docId, pageId);
+  const row = document.createElement('div');
+  row.className = 'pg-row xfer-row';
+  const t = document.createElement('span');
+  t.className = 'pg-num';
+  t.textContent = label;
+  row.appendChild(t);
+  if (sub) { const sm = document.createElement('span'); sm.className = 'muted small'; sm.textContent = sub; row.appendChild(sm); }
+  el.append(th, row);
+  el.addEventListener('click', onClick);
+  return el;
+}
+async function openXfer(mode) {
+  await flushSave();
+  xfer.mode = mode;
+  xfer.src = null;
+  xfer.picked.clear();
+  await renderXferDocs();
+  if (!$('xferDlg').open) $('xferDlg').showModal();
+}
+/** ネームを選ぶ画面 */
+async function renderXferDocs() {
+  xferRevoke();
+  const send = xfer.mode === 'send';
+  $('xferTitle').textContent = send ? `${pgSelected.size}ページを送る先のネーム` : '取り込み元のネーム';
+  $('xferBack').hidden = true;
+  $('xferAll').hidden = $('xferGo').hidden = true;
+  const grid = $('xferGrid');
+  grid.innerHTML = '';
+  grid.classList.remove('selecting');
+  const docs = (await db.listDocs())
+    .filter((d) => d.id !== E.doc.id)
+    .sort((a, b) => (b.updatedAt || '').localeCompare(a.updatedAt || ''));
+  if (send) {
+    const el = xferCard('＋ 新しいネームにする', '', null, null, () => sendPages(null));
+    el.classList.add('xfer-new');
+    grid.appendChild(el);
+  }
+  for (const d of docs) {
+    grid.appendChild(xferCard(d.title, `${d.pages.length}ページ`, d.id, d.pages[0], () => (send ? sendPages(d) : renderXferPages(d))));
+  }
+  $('xferInfo').textContent = docs.length || send
+    ? (send ? 'タップでそのネームの最後へ写す（このネームからは消えない）' : 'ネームをタップしてページを選ぶ')
+    : 'ほかのネームがない';
+}
+/** 取り込むページを選ぶ画面 */
+function renderXferPages(doc) {
+  xferRevoke();
+  xfer.src = doc;
+  xfer.picked.clear();
+  $('xferTitle').textContent = `「${doc.title}」から取り込む`;
+  $('xferBack').hidden = false;
+  $('xferAll').hidden = $('xferGo').hidden = false;
+  const grid = $('xferGrid');
+  grid.innerHTML = '';
+  grid.classList.add('selecting');
+  doc.pages.forEach((pid, i) => {
+    const el = xferCard(String(i + 1), '', doc.id, pid, () => {
+      if (xfer.picked.has(pid)) xfer.picked.delete(pid); else xfer.picked.add(pid);
+      el.classList.toggle('checked', xfer.picked.has(pid));
+      updateXferFoot();
+    });
+    grid.appendChild(el);
+  });
+  updateXferFoot();
+}
+function updateXferFoot() {
+  const n = xfer.picked.size;
+  $('xferGo').disabled = !n;
+  $('xferGo').textContent = n ? `取り込む（${n}ページ）` : '取り込む';
+  $('xferInfo').textContent = `今のページ（${currentPage() + 1}）の後ろへ写す`;
+}
+$('xferBack').addEventListener('click', renderXferDocs);
+$('xferAll').addEventListener('click', () => {
+  const doc = xfer.src;
+  if (!doc) return;
+  const all = xfer.picked.size === doc.pages.length;
+  xfer.picked.clear();
+  if (!all) for (const pid of doc.pages) xfer.picked.add(pid);
+  [...$('xferGrid').children].forEach((el, i) => el.classList.toggle('checked', xfer.picked.has(doc.pages[i])));
+  updateXferFoot();
+});
+$('xferGo').addEventListener('click', async () => {
+  const doc = xfer.src;
+  if (!doc || !xfer.picked.size) return;
+  const pids = doc.pages.filter((pid) => xfer.picked.has(pid));
+  $('xferGo').disabled = true;
+  const at = currentPage() + 1;
+  let k = 0;
+  for (const pid of pids) {
+    const strokes = (await db.getPage(doc.id, pid))?.strokes || [];
+    insertPage(at + k, strokes.slice());
+    k++;
+  }
+  $('xferDlg').close();
+  await afterPageOp();
+  toast(`「${doc.title}」から${k}ページ取り込んだ`);
+});
+/** 選んだページを target(null なら新しいネーム)の最後へ写す */
+async function sendPages(target) {
+  const ids = E.doc.pages.filter((id) => pgSelected.has(id));
+  if (!ids.length) return;
+  await flushSave();
+  if (!target) {
+    const title = await askName('新しいネーム', `${E.doc.title}（抜き出し）`, '作る');
+    if (title === null) return;
+    const t = new Date().toISOString();
+    target = { id: uid('doc'), title: title.trim() || defaultTitle(), createdAt: t, updatedAt: t, w: PAGE_W, h: PAGE_H, pages: [] };
+  } else {
+    target = await db.getDoc(target.id); // 最新を読み直す
+    if (!target) { toast('送り先のネームが見つからない'); return; }
+  }
+  const recs = [], thumbs = [], newIds = [];
+  for (const id of ids) {
+    const strokes = await strokesOf(id);
+    const nid = uid('pg');
+    newIds.push(nid);
+    recs.push([nid, { strokes }]);
+    const th = (await db.getThumb(E.doc.id, id)) || (await makeThumb(null, { strokes }));
+    thumbs.push([nid, th]);
+  }
+  target.pages = target.pages.concat(newIds);
+  target.updatedAt = new Date().toISOString();
+  cloud.noteLocalChange(target, newIds, true);
+  try {
+    await db.savePages(target, recs, thumbs);
+  } catch (err) {
+    console.error(err);
+    toast('送れなかった（容量不足かも）');
+    return;
+  }
+  cloud.touch();
+  cloud.syncSoon();
+  $('xferDlg').close();
+  pgSelectMode = false;
+  pgSelected.clear();
+  await renderPageGrid();
+  toast(`「${target.title}」の最後へ${ids.length}ページ送った`);
+}
+$('xferDlg').addEventListener('close', xferRevoke);
 $('pgAddEnd').addEventListener('click', () => {
   insertPage(pageCount());
   afterPageOp().then(() => $('pageGrid').lastElementChild?.scrollIntoView({ block: 'nearest' }));
@@ -2364,6 +2647,7 @@ async function strokesOf(id) {
 }
 let exportCanvas = null;
 async function renderPagePng(strokes, white) {
+  await ensureImages(strokes);
   if (!exportCanvas) {
     exportCanvas = document.createElement('canvas');
     exportCanvas.width = PAGE_W;

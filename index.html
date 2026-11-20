@@ -19,7 +19,7 @@
 <!-- Dropbox連携の共通ライブラリ(無改造で利用)。読み込めなければローカルのみで動く -->
 <link rel="stylesheet" href="https://moyorieki.github.io/storage-bridge/storage-bridge.css">
 <script src="https://moyorieki.github.io/storage-bridge/storage-bridge.js"></script>
-<link rel="stylesheet" href="css/app.css?v=23">
+<link rel="stylesheet" href="css/app.css?v=24">
 <title>ネームビルダー</title>
 </head>
 <body>
@@ -60,6 +60,10 @@
       <button id="nextBtn" class="ibtn" type="button">▶</button>
     </div>
     <button id="pagesBtn" class="ibtn" type="button" title="ページ一覧">▦</button>
+    <button id="imageBtn" class="ibtn" type="button" title="画像を取り込む（作品の中に保存。元のファイルとは紐づけない）">
+      <svg class="bar-ico" viewBox="0 0 24 24" aria-hidden="true"><rect x="3.5" y="5" width="17" height="14" rx="2"/><circle cx="9" cy="10" r="1.6"/><path d="M4 17l5-5 4 4 3-3 4 4"/></svg>
+    </button>
+    <input id="imageFile" type="file" accept="image/*" hidden>
     <button id="exportBtn" class="ibtn" type="button" title="PNG書き出し">⤓</button>
     <button id="settingsBtn" class="ibtn" type="button" title="設定">⚙</button>
   </header>
@@ -67,6 +71,9 @@
   <nav id="dock" class="dock">
     <div id="penSlots"></div>
     <button id="eraserBtn" class="tool" type="button" title="消しゴム (E)"><span class="eraser-ico"></span></button>
+    <button id="underPenBtn" class="tool" type="button" title="塗りペン (U)：いつも一番下に描かれる（線の下を塗る）。2回タップで設定">
+      <span class="under-ico"></span><span class="pen-w"></span>
+    </button>
     <button id="textPenBtn" class="tool" type="button" title="文字ペン (T)：いつも一番上に描かれる・白いフチつき。2回タップで設定">
       <span class="text-ico">あ</span><span class="mode-badge"></span>
     </button>
@@ -87,6 +94,8 @@
 
   <div id="selBar" class="sel-bar" hidden>
     <button id="selFill" type="button" title="選択範囲を塗りつぶしの色で塗る">塗る</button>
+    <button id="selFront" type="button" title="ほかの線より前（上）へ">前面</button>
+    <button id="selBack" type="button" title="ほかの線より後ろ（下）へ">背面</button>
     <button id="selDup" type="button">複製</button>
     <button id="selDel" type="button" class="danger">削除</button>
     <button id="selClear" type="button" title="選択を解除">✕</button>
@@ -168,9 +177,28 @@
   <footer class="sheet-foot">
     <span id="pageSelInfo" class="muted small"></span>
     <span class="grow"></span>
+    <button id="pgImport" class="btn" type="button" title="ほかのネームのページを、線などそのままで今のページの後ろへ写す">他のネームから取り込む</button>
     <button id="pgAddEnd" class="btn" type="button">＋ 最後にページを追加</button>
     <button id="pgSelAll" class="btn" type="button" hidden>すべて選択</button>
+    <button id="pgSendSel" class="btn" type="button" hidden title="選んだページを、ほかのネームの最後へ写す（このネームからは消えない）">他のネームへ送る</button>
     <button id="pgDelSel" class="btn danger-fill" type="button" hidden>削除</button>
+  </footer>
+</dialog>
+
+<!-- ============ ほかのネームとのページのやりとり ============ -->
+<dialog id="xferDlg" class="sheet">
+  <header class="sheet-head">
+    <button id="xferBack" class="btn" type="button" hidden>‹ 戻る</button>
+    <h2 id="xferTitle"></h2>
+    <span class="grow"></span>
+    <button class="btn" type="button" data-close>閉じる</button>
+  </header>
+  <div id="xferGrid" class="page-grid"></div>
+  <footer class="sheet-foot">
+    <span id="xferInfo" class="muted small"></span>
+    <span class="grow"></span>
+    <button id="xferAll" class="btn" type="button" hidden>すべて選択</button>
+    <button id="xferGo" class="btn primary" type="button" hidden>取り込む</button>
   </footer>
 </dialog>
 
@@ -318,6 +346,6 @@
 </script>
 <!-- 版番号(?v=)は css/js を変えるたびに index.html と js/app.js の両方で上げる。
      新旧のファイルが混ざって読み込みに失敗するのを防ぐため -->
-<script type="module" src="js/app.js?v=23"></script>
+<script type="module" src="js/app.js?v=24"></script>
 </body>
 </html>
