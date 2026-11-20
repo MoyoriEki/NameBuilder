@@ -4,7 +4,10 @@
               o?:筆圧0のときの濃さ(0..1。あれば「筆圧で濃さが変わる線」),
               of?:真っ黒(濃さ100%)になる筆圧(0..1。無ければ1), og?:濃さのカーブ(無ければ1),
               x?:1 なら文字ペンの線(オートレイヤー: いつも一番上に描く), b?:文字ペンのフチの太さ(page-px),
-              k?:'f' なら塗り(バケツ)。p は輪郭の点列で、筆圧の欄が1の点から新しい輪郭が始まる。w=0 }
+              k?:'f' なら塗り(バケツ)。p は輪郭の点列で、筆圧の欄が1の点から新しい輪郭が始まる。w=0
+              k?:'i' なら画像。p は四隅の点(左上・右上・右下・左下)、img に画像のBlob(作品の中に持つ)。w=0
+              u?:1 なら塗りペンの線(オートレイヤー: いつも一番下に描く) }
+   - 重なり順は 塗りペン(u) → ふつうの線・塗り・画像 → 文字ペン(x)。配列もこの順に並べておく(addStrokes)
    - 文字ペンの線は、ほかの線・塗りより必ず上に描く。フチ(白)を全部描いてから中身を描くので、
      フチが隣の文字を隠さない。配列の中でも文字ペンの線は後ろにまとめる(addStrokes)
    - 点列はページ座標(0..W, 0..H)。手ブレ補正は入力時に済ませた後の座標を保存する
@@ -209,27 +212,82 @@ function drawBorder(ctx, path, b) {
 /** 線の並びを描く。文字ペンの線は最後に、フチ → 中身 の順でまとめて描く。
  *  skip: 描かない線の Set(動かしている最中の線など) */
 export function drawStrokes(ctx, strokes, thicken = 0, skip = null) {
-  let text = null;
+  let text = null, mid = null;
   for (const st of strokes) {
     if (skip && skip.has(st)) continue;
-    if (st.x) { (text ||= []).push(st); continue; }
-    drawStroke(ctx, st, thicken);
+    if (st.x) (text ||= []).push(st);
+    else if (st.u) drawStroke(ctx, st, thicken); // 塗りペンは一番下
+    else (mid ||= []).push(st);
   }
+  if (mid) for (const st of mid) drawStroke(ctx, st, thicken);
   if (!text) return;
   for (const st of text) if (st.b > 0) drawBorder(ctx, strokePath(st), st.b);
   for (const st of text) drawStroke(ctx, st, thicken);
 }
-/** 新しい線を足した配列を返す。文字ペンの線はいつも後ろ(上)、それ以外は文字ペンの線より前に入れる */
-export function addStrokes(arr, news) {
-  const plain = news.filter((s) => !s.x), text = news.filter((s) => s.x);
-  if (!plain.length) return arr.concat(text);
-  let i = arr.length;
-  while (i > 0 && arr[i - 1].x) i--;
-  return arr.slice(0, i).concat(plain, arr.slice(i), text);
+/** 新しい線を足した配列を返す。並びは [塗りペン… | ふつう… | 文字ペン…] に保つ。
+ *  それぞれの段のいちばん上に入れる。bottom=true なら、ふつうの線は段のいちばん下(塗りペンのすぐ上)に入れる */
+export function addStrokes(arr, news, bottom = false) {
+  let a = 0;
+  while (a < arr.length && arr[a].u) a++;
+  let b = arr.length;
+  while (b > a && arr[b - 1].x) b--;
+  const U = news.filter((s) => s.u), X = news.filter((s) => s.x), N = news.filter((s) => !s.u && !s.x);
+  const mid = arr.slice(a, b);
+  return arr.slice(0, a).concat(U, bottom ? N.concat(mid) : mid.concat(N), arr.slice(b), X);
+}
+
+/* ---- 画像 ----
+   Blob を作品のデータの中に持つ(元のファイルとは紐づけない)。表示用の ImageBitmap は初めて要るときに
+   非同期で作り、できたら setImageReady で渡した関数を呼ぶ(そのページを描き直してもらう) */
+export const isImage = (st) => st.k === 'i';
+const bitmaps = new WeakMap(); // Blob -> ImageBitmap | Promise | 'bad'
+let imageReady = null;
+export function setImageReady(fn) { imageReady = fn; }
+function bitmapOf(st) {
+  const v = bitmaps.get(st.img);
+  if (v && !(v instanceof Promise)) return v === 'bad' ? null : v;
+  if (!v && st.img) {
+    const pr = createImageBitmap(st.img)
+      .then((bm) => { bitmaps.set(st.img, bm); imageReady?.(st); })
+      .catch(() => { bitmaps.set(st.img, 'bad'); });
+    bitmaps.set(st.img, pr);
+  }
+  return null;
+}
+/** 画像を全部読み込んでおく(書き出し・塗りつぶしの前に) */
+export function ensureImages(strokes) {
+  const waits = [];
+  for (const st of strokes) {
+    if (st.k !== 'i') continue;
+    bitmapOf(st);
+    const v = bitmaps.get(st.img);
+    if (v instanceof Promise) waits.push(v);
+  }
+  return Promise.all(waits);
+}
+/** 画像の四隅 → [x0,y0,x1,y1] */
+export function imageRect(st) {
+  const p = st.p;
+  let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+  for (let i = 0; i < p.length; i += 3) {
+    x0 = Math.min(x0, p[i]); x1 = Math.max(x1, p[i]);
+    y0 = Math.min(y0, p[i + 1]); y1 = Math.max(y1, p[i + 1]);
+  }
+  return [x0, y0, x1, y1];
+}
+export function makeImage(blob, x0, y0, x1, y1) {
+  return { c: '#000000', w: 0, t: 0, k: 'i', img: blob, p: new Float32Array([x0, y0, 0, x1, y0, 0, x1, y1, 0, x0, y1, 0]) };
 }
 
 /** thicken: 輪郭をこの太さで縁取って太らせる(縮小サムネ用) */
 export function drawStroke(ctx, st, thicken = 0) {
+  if (st.k === 'i') {
+    const [x0, y0, x1, y1] = imageRect(st);
+    const bm = bitmapOf(st);
+    if (bm) ctx.drawImage(bm, x0, y0, x1 - x0, y1 - y0);
+    else { ctx.fillStyle = 'rgba(150,160,170,0.25)'; ctx.fillRect(x0, y0, x1 - x0, y1 - y0); } // 読み込み中
+    return;
+  }
   if (st.k === 'f') {
     const path = fillPath(st);
     ctx.fillStyle = st.c;
@@ -298,6 +356,8 @@ export function hitStroke(st, x, y, r) {
   const b = bbox(st);
   if (x + r < b[0] || x - r > b[2] || y + r < b[1] || y - r > b[3]) return false;
   if (st.k === 'f') return inFill(st, x, y) || fillEdgeNear(st, x, y, r);
+  if (st.k === 'i') return true; // 外接矩形 = 画像の範囲
+
   const p = st.p;
   if (p.length === 3) {
     const rr = r + radiusAt(st, p[2]);
@@ -314,7 +374,7 @@ export function hitStroke(st, x, y, r) {
  *  触れていなければ null。点の間隔が粗いと削れ方が粗くなるので、
  *  触れた線だけ細かく補間してから判定する */
 export function eraseSplit(st, x, y, r) {
-  if (st.k === 'f') return null; // 塗りの部分消しは別扱い(消しゴムを離したときに削る)
+  if (st.k === 'f' || st.k === 'i') return null; // 塗りの部分消しは別扱い(消しゴムを離したときに削る)。画像は消さない
   if (!hitStroke(st, x, y, r)) return null;
   const p = st.p;
   const step = Math.max(0.75, Math.min(r * 0.35, st.w * 0.35));
@@ -417,7 +477,7 @@ export function transformStroke(st, ax, ay, s, dx, dy) {
     q[i + 2] = p[i + 2];
   }
   const out = { ...st, p: q };
-  if (s !== 1 && st.k !== 'f') out.w = Math.max(0.3, Math.round(st.w * s * 100) / 100);
+  if (s !== 1 && !st.k) out.w = Math.max(0.3, Math.round(st.w * s * 100) / 100);
   if (s !== 1 && st.b) out.b = Math.round(st.b * s * 100) / 100;
   return out;
 }
