@@ -19,7 +19,7 @@
 <!-- Dropbox連携の共通ライブラリ(無改造で利用)。読み込めなければローカルのみで動く -->
 <link rel="stylesheet" href="https://moyorieki.github.io/storage-bridge/storage-bridge.css">
 <script src="https://moyorieki.github.io/storage-bridge/storage-bridge.js"></script>
-<link rel="stylesheet" href="css/app.css?v=26">
+<link rel="stylesheet" href="css/app.css?v=27">
 <title>ネームビルダー</title>
 </head>
 <body>
@@ -159,7 +159,22 @@
   <label class="row">色を指定 <input id="fillColorInput" type="color"></label>
   <label class="row col">はみ出し <span class="muted small">線の下へ広げる幅。線のきわに白い隙間が残るときは大きく</span> <span><output id="fillExpandOut"></output> px</span>
     <input id="fillExpand" type="range" min="0" max="8" step="1"></label>
-  <p class="muted small">線で囲まれた所をタップで塗る（文字ペンの線は見ないので、文字の下にも塗れる）。投げ縄・四角で選んだ中をタップすると、線に関係なく選択範囲を塗る。塗りも線と同じく、選択して移動・拡大縮小・消しゴムで消せる。</p>
+  <div class="row">塗る先</div>
+  <div class="seg">
+    <label><input type="radio" name="fillLayer" value="n"> 線画</label>
+    <label><input type="radio" name="fillLayer" value="u"> 塗り</label>
+    <label><input type="radio" name="fillLayer" value="x"> 文字</label>
+  </div>
+  <div id="fillRefBox" class="sub-box">
+    <div class="row small">塗りに塗るときに、境目として見るレイヤー</div>
+    <div class="seg">
+      <label><input type="checkbox" id="fillRef_n"> 線画</label>
+      <label><input type="checkbox" id="fillRef_u"> 塗り</label>
+      <label><input type="checkbox" id="fillRef_x"> 文字</label>
+    </div>
+  </div>
+  <p id="fillModeNote" class="small"></p>
+  <p class="muted small">線画 … 線画を見て、線画レイヤーに塗る。<br>塗り … 選んだレイヤー（標準は線画）を見て、塗りレイヤー（いちばん下）に塗る。線の下に色を置くとき用。<br>文字 … 文字ペンの線を見て、文字レイヤーに塗る。フキダシや描き文字の中を塗るとき用。中の文字は塗りに隠れない。<br>ボタン左上の印をタップしても 線画→塗り→文字 の順に切り替わる。投げ縄・四角で選んだ中をタップすると、線に関係なく選択範囲を、選んだ塗る先のレイヤーに塗る。</p>
   <div class="actions"><button class="btn" type="button" data-close>閉じる</button></div>
 </dialog>
 
@@ -364,6 +379,6 @@
 </script>
 <!-- 版番号(?v=)は css/js を変えるたびに index.html と js/app.js の両方で上げる。
      新旧のファイルが混ざって読み込みに失敗するのを防ぐため -->
-<script type="module" src="js/app.js?v=26"></script>
+<script type="module" src="js/app.js?v=27"></script>
 </body>
 </html>
