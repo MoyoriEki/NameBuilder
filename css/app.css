@@ -43,6 +43,7 @@ button { font: inherit; color: inherit; }
 .ibtn:hover { background: rgba(0, 0, 0, 0.05); }
 .ibtn:disabled { opacity: 0.3; cursor: default; background: transparent; }
 .pill {
+  white-space: nowrap;
   height: 32px; padding: 0 12px; border: 1px solid var(--line); border-radius: 16px;
   background: #fff; font-size: 14px; cursor: pointer; font-variant-numeric: tabular-nums;
 }
@@ -302,3 +303,24 @@ input[type=checkbox], input[type=radio] { width: 18px; height: 18px; accent-colo
 /* 当たりはボタンの外側(左上)へだけ広げる。内側へ広げるとボタンの真ん中を押したときに切り替わってしまう */
 .layer-chip::before { content: ''; position: absolute; inset: -6px 0 0 -6px; }
 .layer-chip.auto { outline: 1.5px dashed #fff; outline-offset: -3px; }
+
+/* ---------- スマホ(縦向きで幅が狭い画面) ----------
+   上のバーは詰めて、入りきらなければ横にスクロール。道具ドックは画面の下に横一列(横にスクロール) */
+#editor.compact .topbar { gap: 0; padding: 0 2px; overflow-x: auto; scrollbar-width: none; }
+#editor.compact .topbar::-webkit-scrollbar { display: none; }
+#editor.compact .topbar > * { flex: none; }
+#editor.compact .doc-title, #editor.compact #pagesBtn { display: none; } /* ページ一覧はページ番号から開ける */
+#editor.compact .ibtn { min-width: 34px; font-size: 18px; }
+#editor.compact .pagenav .ibtn { min-width: 28px; }
+#editor.compact .pill { padding: 0 8px; }
+#editor.compact .dock {
+  top: auto; bottom: 0; left: 0; right: 0; flex-direction: row; align-items: center;
+  border-radius: 0; gap: 1px; padding: 4px 4px calc(4px + env(safe-area-inset-bottom));
+  overflow-x: auto; overscroll-behavior: contain; scrollbar-width: none;
+}
+#editor.compact .dock::-webkit-scrollbar { display: none; }
+#editor.compact #penSlots { flex-direction: row; gap: 1px; }
+#editor.compact .tool { flex: none; width: 42px; height: 44px; }
+#editor.compact #addPageBtn, #editor.compact #delPageBtn { display: none; } /* ページの追加・削除はページ一覧から */
+#editor.compact .zoom-pill { bottom: calc(var(--dock-h) + 8px); }
+#editor.compact .toast { bottom: calc(var(--dock-h) + 16px); }
