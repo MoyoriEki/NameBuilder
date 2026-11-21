@@ -6,13 +6,13 @@
    - 描画中の線だけは重ねキャンバス(#live)に描き、
      ペンを離したらページのキャッシュへ焼き込む
    ============================================================ */
-import * as db from './db.js?v=27';
+import * as db from './db.js?v=28';
 import { drawStroke, drawStrokes, addStrokes, drawLiveStroke, isOpacityStroke, opacityAt, bbox, bboxHit, hitStroke, eraseSplit, sweep,
   fractionInPoly, topStrokeAt, unionBox, transformStroke, pointInPoly, strokePath,
-  ensureImages, setImageReady, makeImage } from './ink.js?v=27';
-import { bucketFill, polygonFill, subtractCircles } from './fill.js?v=27';
-import { pngWithDpi, makeZip } from './zip.js?v=27';
-import * as cloud from './cloud.js?v=27';
+  ensureImages, setImageReady, makeImage } from './ink.js?v=28';
+import { bucketFill, polygonFill, subtractCircles } from './fill.js?v=28';
+import { pngWithDpi, makeZip } from './zip.js?v=28';
+import * as cloud from './cloud.js?v=28';
 
 const PAGE_W = 2508, PAGE_H = 3541, DPI = 350;
 const GAP = 140;                 // ページ間の隙間(page-px)
@@ -186,6 +186,7 @@ function setCur(i) {
 /** ページを置ける画面内の領域(css-px)。バーやドックの分を除く */
 function area() {
   const m = 12;
+  if (compactUI) return { x0: 8, x1: viewW - 8, y0: TOPBAR + 8, y1: viewH - compactDockH - 8 };
   if (barVertical) {
     const left = settings.dockSide !== 'right';
     return {
@@ -339,16 +340,24 @@ const FLIP_EASE = [
 const flipEase = () => FLIP_EASE[clamp(Math.round(settings.flipEase || 3), 1, 5)];
 
 /* ---- メニューバーの向き ---- */
+/* スマホ(縦向きで幅が狭い)用: 道具ドックを画面の下に横一列で置き、上のバーも詰める。
+   ページは画面の幅いっぱいまで使う */
+let compactUI = false, compactDockH = 0;
+const COMPACT_W = 640;
 function applyLayout() {
   const mode = settings.barMode || 'auto';
   const vertical = mode === 'side' || (mode === 'auto' && window.innerWidth > window.innerHeight * 1.1);
   const ed = $('editor');
   barVertical = vertical;
+  compactUI = !vertical && window.innerWidth < COMPACT_W;
+  ed.classList.toggle('compact', compactUI);
   ed.classList.toggle('vbar', vertical);
   ed.classList.toggle('side-right', settings.dockSide === 'right');
   const dock = $('dock');
   if (vertical) { if (dock.parentElement !== $('topbar')) $('topbar').appendChild(dock); }
   else if (dock.parentElement !== ed) ed.insertBefore(dock, $('zoomPill'));
+  compactDockH = compactUI ? dock.offsetHeight : 0;
+  ed.style.setProperty('--dock-h', compactDockH + 'px');
 }
 
 function resize() {
