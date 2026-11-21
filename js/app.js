@@ -6,13 +6,13 @@
    - 描画中の線だけは重ねキャンバス(#live)に描き、
      ペンを離したらページのキャッシュへ焼き込む
    ============================================================ */
-import * as db from './db.js?v=26';
+import * as db from './db.js?v=27';
 import { drawStroke, drawStrokes, addStrokes, drawLiveStroke, isOpacityStroke, opacityAt, bbox, bboxHit, hitStroke, eraseSplit, sweep,
   fractionInPoly, topStrokeAt, unionBox, transformStroke, pointInPoly, strokePath,
-  ensureImages, setImageReady, makeImage } from './ink.js?v=26';
-import { bucketFill, polygonFill, subtractCircles } from './fill.js?v=26';
-import { pngWithDpi, makeZip } from './zip.js?v=26';
-import * as cloud from './cloud.js?v=26';
+  ensureImages, setImageReady, makeImage } from './ink.js?v=27';
+import { bucketFill, polygonFill, subtractCircles } from './fill.js?v=27';
+import { pngWithDpi, makeZip } from './zip.js?v=27';
+import * as cloud from './cloud.js?v=27';
 
 const PAGE_W = 2508, PAGE_H = 3541, DPI = 350;
 const GAP = 140;                 // ページ間の隙間(page-px)
@@ -40,7 +40,9 @@ const DEFAULTS = {
   tool: 'pen0',
   textPen: { c: '#1f2328', w: 6, pr: true, b: 8 }, // 文字ペン(オートレイヤー)。b = フチの太さ(page-px)
   underPen: { c: '#c4c9ce', w: 40, pr: false },    // 塗りペン(オートレイヤー: いつも一番下)
-  fill: { c: '#1f2328', e: 2 },                   // 塗りつぶし。e = はみ出し(線の下へ広げる px)
+  // 塗りつぶし。e = はみ出し(線の下へ広げる px)、layer = 塗る先(n=線画 / u=塗り / x=文字)、
+  // ref = 塗り(u)に塗るときに境目として見るレイヤー(線画・文字は、それぞれ自分のレイヤーだけを見る)
+  fill: { c: '#1f2328', e: 2, layer: 'n', ref: { n: true, u: false, x: false } },
   eraserMode: 'part',
   eraseTarget: 'all', // 消しゴムが消すレイヤー: all=全部 / n=線画 / x=文字 / u=塗り / auto=直前に使ったペンのレイヤー
   selTarget: 'all',   // 範囲選択・移動で選ぶレイヤー(同上)
@@ -74,6 +76,8 @@ const settings = (() => {
   // 直前に使ったペン(消しゴム・選択の対象レイヤーを決める)
   if (!/^pen[0-4]$/.test(s.lastPen || '')) s.lastPen = /^pen[0-4]$/.test(s.tool) ? s.tool : 'pen0';
   s.fill = { ...DEFAULTS.fill, ...s.fill };
+  s.fill.ref = { ...DEFAULTS.fill.ref, ...s.fill.ref };
+  if (!['n', 'u', 'x'].includes(s.fill.layer)) s.fill.layer = 'n';
   return s;
 })();
 const saveSettings = () => localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
@@ -1317,7 +1321,7 @@ function addToPage(pageId, news, bottom = false) {
 function fillSel() {
   if (!sel?.poly || selOp) return;
   const f = polygonFill(sel.poly, settings.fill.c);
-  if (!f || !addToPage(sel.pageId, [f])) return;
+  if (!f || !addToPage(sel.pageId, [toFillLayer(f)])) return;
   sel.strokes = sel.strokes.concat([f]);
   sel.box = selBoxOf(sel);
   sel.rev = pageState(sel.pageId).rev;
@@ -1338,8 +1342,25 @@ async function doFill(wx, wy) {
   const strokes = ps.strokes;
   await ensureImages(strokes); // 画像の線も境目として使う
   if (ps.strokes !== strokes) return; // 待っている間に変わった
-  const f = bucketFill(strokes, PAGE_W, PAGE_H, hit.x, hit.y, settings.fill.c, settings.fill.e);
-  if (f) addToPage(hit.id, [f]);
+  const f = bucketFill(fillRefs(strokes), PAGE_W, PAGE_H, hit.x, hit.y, settings.fill.c, settings.fill.e);
+  if (f) addToPage(hit.id, [toFillLayer(f)]);
+}
+/* 塗りつぶしのレイヤー:
+   線画 … 線画レイヤーを見て、線画レイヤーに塗る(今までどおり)
+   塗り … 設定で選んだレイヤー(標準は線画)を見て、塗りレイヤー(いちばん下)に塗る。線の下に色を置く用
+   文字 … 文字レイヤーを見て、文字レイヤーに塗る。文字ペンで描いたフキダシ・描き文字の中を塗る用。
+          文字レイヤーの塗りは文字の線より下に描くので、中の文字は隠れない */
+const FILL_LAYERS = ['n', 'u', 'x'];
+function fillRefs(strokes) {
+  const L = settings.fill.layer;
+  if (L !== 'u') return strokes.filter((st) => layerOf(st) === L);
+  const ref = settings.fill.ref;
+  return strokes.filter((st) => ref[layerOf(st)]);
+}
+function toFillLayer(f) {
+  if (settings.fill.layer === 'u') f.u = 1;
+  if (settings.fill.layer === 'x') { f.x = 1; f.b = 0; }
+  return f;
 }
 /** 投げ縄の線・選択枠・拡大縮小ハンドル・操作ボタン(drawLive から。ctx は重ねキャンバス) */
 function drawSelOverlay(ctx) {
@@ -1851,6 +1872,21 @@ for (const [id, key, what] of [['eraserBtn', 'eraseTarget', '消しゴム'], ['m
     cycleTarget(key, what);
   }, true);
 }
+// 塗りつぶしの印: 塗る先を 線画→塗り→文字 の順に切り替える
+$('fillBtn').addEventListener('click', (e) => {
+  if (!e.target.closest('.layer-chip')) return;
+  e.stopImmediatePropagation();
+  const i = FILL_LAYERS.indexOf(settings.fill.layer);
+  setFill({ layer: FILL_LAYERS[(i + 1) % FILL_LAYERS.length] });
+  toast(`塗りつぶし: ${fillModeName()}`);
+}, true);
+function fillModeName() {
+  const L = settings.fill.layer;
+  if (L === 'n') return '線画に塗る';
+  if (L === 'x') return '文字に塗る（文字を見る）';
+  const refs = FILL_LAYERS.filter((k) => settings.fill.ref[k]).map((k) => LAYERS[k].name);
+  return `塗りに塗る（${refs.join('・') || '何も'}を見る）`;
+}
 function renderDock() {
   const box = $('penSlots');
   box.innerHTML = '';
@@ -1882,6 +1918,7 @@ function renderDock() {
   setLayerChip(eb, settings.eraseTarget);
   setLayerChip($('moveBtn'), settings.selTarget);
   setLayerChip($('selectBtn'), settings.selTarget);
+  setLayerChip($('fillBtn'), settings.fill.layer);
   $('moveBtn').classList.toggle('active', settings.tool === 'move');
   const sb = $('selectBtn');
   sb.classList.toggle('active', settings.tool === 'select');
@@ -2157,7 +2194,23 @@ function openFillDialog() {
   $('fillColorInput').value = settings.fill.c;
   $('fillExpand').value = settings.fill.e;
   $('fillExpandOut').textContent = settings.fill.e;
+  for (const r of document.querySelectorAll('input[name=fillLayer]')) r.checked = r.value === settings.fill.layer;
+  for (const k of FILL_LAYERS) $('fillRef_' + k).checked = !!settings.fill.ref[k];
+  syncFillRef();
   if (!$('fillDlg').open) $('fillDlg').showModal();
+}
+function syncFillRef() {
+  $('fillRefBox').hidden = settings.fill.layer !== 'u';
+  $('fillModeNote').textContent = `今: ${fillModeName()}`;
+}
+for (const r of document.querySelectorAll('input[name=fillLayer]')) {
+  r.addEventListener('change', () => { setFill({ layer: r.value }); syncFillRef(); });
+}
+for (const k of FILL_LAYERS) {
+  $('fillRef_' + k).addEventListener('change', (e) => {
+    setFill({ ref: { ...settings.fill.ref, [k]: e.target.checked } });
+    syncFillRef();
+  });
 }
 function setFill(patch) {
   Object.assign(settings.fill, patch);

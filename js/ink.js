@@ -221,8 +221,10 @@ export function drawStrokes(ctx, strokes, thicken = 0, skip = null) {
   }
   if (mid) for (const st of mid) drawStroke(ctx, st, thicken);
   if (!text) return;
-  for (const st of text) if (st.b > 0) drawBorder(ctx, strokePath(st), st.b);
-  for (const st of text) drawStroke(ctx, st, thicken);
+  // 文字レイヤーの塗り(フキダシの中など)は文字より下に。文字の線が塗りに隠れないように
+  for (const st of text) if (st.k === 'f') drawStroke(ctx, st, thicken);
+  for (const st of text) if (st.b > 0 && st.k !== 'f') drawBorder(ctx, strokePath(st), st.b);
+  for (const st of text) if (st.k !== 'f') drawStroke(ctx, st, thicken);
 }
 /** 新しい線を足した配列を返す。並びは [塗りペン… | ふつう… | 文字ペン…] に保つ。
  *  それぞれの段のいちばん上に入れる。bottom=true なら、ふつうの線は段のいちばん下(塗りペンのすぐ上)に入れる */
