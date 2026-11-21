@@ -5,7 +5,7 @@
    - 範囲(マスク)の輪郭をたどってベクターの多角形にし、点を間引いて「塗り」として保存する
      (線と同じく、選択して移動・拡大縮小・undo・同期ができる)
    ============================================================ */
-import { drawStrokes, makeFill, fillPath } from './ink.js?v=28';
+import { drawStrokes, makeFill, fillPath } from './ink.js?v=29';
 
 const TOL = 24; // タップした色との差がこれ以内なら同じ色とみなす(0..255)
 
