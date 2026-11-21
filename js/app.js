@@ -6,13 +6,13 @@
    - 描画中の線だけは重ねキャンバス(#live)に描き、
      ペンを離したらページのキャッシュへ焼き込む
    ============================================================ */
-import * as db from './db.js?v=28';
+import * as db from './db.js?v=29';
 import { drawStroke, drawStrokes, addStrokes, drawLiveStroke, isOpacityStroke, opacityAt, bbox, bboxHit, hitStroke, eraseSplit, sweep,
   fractionInPoly, topStrokeAt, unionBox, transformStroke, pointInPoly, strokePath,
-  ensureImages, setImageReady, makeImage } from './ink.js?v=28';
-import { bucketFill, polygonFill, subtractCircles } from './fill.js?v=28';
-import { pngWithDpi, makeZip } from './zip.js?v=28';
-import * as cloud from './cloud.js?v=28';
+  ensureImages, setImageReady, makeImage } from './ink.js?v=29';
+import { bucketFill, polygonFill, subtractCircles } from './fill.js?v=29';
+import { pngWithDpi, makeZip } from './zip.js?v=29';
+import * as cloud from './cloud.js?v=29';
 
 const PAGE_W = 2508, PAGE_H = 3541, DPI = 350;
 const GAP = 140;                 // ページ間の隙間(page-px)
@@ -61,6 +61,7 @@ const DEFAULTS = {
   flipEase: 3,        // めくりの軽さ 1(重い)〜5(軽い)
   flipNear: 0.35,     // 隣のページの近さ(今のページの端から画面の端までのうち、どれだけ離して置くか。0=すぐ横 1=画面の外)
   lowLatency: false,  // 低遅延描画(実験的)
+  noMargin: false,    // 閲覧用: ページを全体表示したとき、まわりに余白を空けない(バー・ドックの所は避ける)
   fullscreen: true,   // 作品を開いている間は全画面(Androidの上のステータスバーと下のナビゲーションバーを隠す)
   exportDbx: false,   // PNG書き出しをDropboxのフォルダに保存する(前回の選択を覚える)
   exportFolder: '',   // 書き出し先のDropboxフォルダの既定(空=トップ)
@@ -185,8 +186,12 @@ function setCur(i) {
 
 /** ページを置ける画面内の領域(css-px)。バーやドックの分を除く */
 function area() {
-  const m = 12;
-  if (compactUI) return { x0: 8, x1: viewW - 8, y0: TOPBAR + 8, y1: viewH - compactDockH - 8 };
+  const nm = settings.noMargin;
+  const m = nm ? 0 : 12;
+  if (compactUI) {
+    const c = nm ? 0 : 8;
+    return { x0: c, x1: viewW - c, y0: TOPBAR + c, y1: viewH - compactDockH - c };
+  }
   if (barVertical) {
     const left = settings.dockSide !== 'right';
     return {
@@ -195,6 +200,11 @@ function area() {
       y0: m,
       y1: viewH - m,
     };
+  }
+  if (nm) {
+    // 浮いている道具ドック(幅74px)の側だけ避ける
+    const left = settings.dockSide !== 'right';
+    return { x0: left ? 74 : 0, x1: viewW - (left ? 0 : 74), y0: TOPBAR, y1: viewH };
   }
   return { x0: 84, x1: viewW - 84, y0: TOPBAR + 14, y1: viewH - 14 };
 }
@@ -2903,6 +2913,7 @@ async function openSettings() {
   $('tapUndo').checked = settings.tapUndo;
   $('lowLatency').checked = settings.lowLatency;
   $('fullscreen').checked = settings.fullscreen;
+  $('noMargin').checked = settings.noMargin;
   $('exportFolderDef').value = settings.exportFolder;
   for (const r of document.querySelectorAll('input[name=dockSide]')) r.checked = r.value === settings.dockSide;
   for (const n of ['viewMode', 'readDir', 'barMode']) {
@@ -2935,6 +2946,11 @@ $('exportFolderDef').addEventListener('change', (e) => {
   settings.exportFolder = cloud.normalizeFolder(e.target.value);
   e.target.value = settings.exportFolder;
   saveSettings();
+});
+$('noMargin').addEventListener('change', (e) => {
+  settings.noMargin = e.target.checked;
+  saveSettings();
+  if (E) showPage(currentPage()); // 新しい余白で全体表示し直す
 });
 $('fullscreen').addEventListener('change', (e) => {
   settings.fullscreen = e.target.checked;
