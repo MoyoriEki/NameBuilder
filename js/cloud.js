@@ -12,7 +12,8 @@
    - 競合(同じ作品を両方の端末で変えた): どちらも捨てない。
      Dropbox側の版を「（別端末の版）」として別作品に取り込み、こちらの版で上書きする
    ============================================================ */
-import * as db from './db.js?v=30';
+import * as db from './db.js?v=31';
+import { rasterBlob } from './ink.js?v=31';
 
 const BASE = '/NameBuilder';
 const PREFIX = 'namebuilder';
@@ -414,7 +415,8 @@ function uid(p) {
    ページの線データの符号化(Dropbox用)
    'NBP1' | u32 メタJSON長 | メタJSON([[色,太さ,筆圧の効き,濃さ|null,点数(, 真っ黒の筆圧, 濃さのカーブ(, 種類, フチ(, 画像のバイト数, 画像の形式(, おまけ{bl,a})))))], …]) | 0埋め(偶数へ)
    種類: 線は レイヤーの文字('u'=塗り/'s'=影/'h'=白/'x'=文字、線画は無し)、塗りは 'f'+レイヤー('f'=線画/'fu'/'fs'/'fh'/'fx')、
-   スプレーは 'd'+レイヤー('dh' など)、画像は 'i'。おまけはぼかし(bl)・濃さ(a)。古い版は読み飛ばす
+   スプレーは 'd'+レイヤー('dh' など)、画像は 'i'、画像の段(塗り・影・白)は 'r'+レイヤー('ru'/'rs'/'rh'。PNG のバイト列を画像と同じく後ろに持つ)。
+   おまけはぼかし(bl)・濃さ(a)。古い版は読み飛ばす
    | Int16 x,y(1/8 px 単位) × 点数 | Uint8 筆圧(0..255) × 点数 | 画像のバイト列(画像があれば、出てくる順に)
    これ全体を gzip して 'NBZ1' を前に付ける(CompressionStream が無い環境では生のまま)
    ============================================================ */
@@ -423,14 +425,19 @@ const MAGIC_RAW = 0x3150424e; // 'NBP1' (little endian)
 const MAGIC_GZ = 0x315a424e;  // 'NBZ1'
 
 export async function encodePage(strokes) {
-  const imgs = await Promise.all(strokes.map((s) => (s.k === 'i' && s.img ? s.img.arrayBuffer() : null)));
+  // 画像・画像の段のバイト列(画像の段は、開いている作品だと PNG ができるのを待つ)
+  const imgs = await Promise.all(strokes.map(async (s) => {
+    if (s.k === 'i') return s.img ? s.img.arrayBuffer() : null;
+    if (s.k === 'r') { const b = await rasterBlob(s); return b ? b.arrayBuffer() : null; }
+    return null;
+  }));
   // 6・7番目(真っ黒になる筆圧・濃さのカーブ)は後から足した。古い版は読み飛ばすだけなので互換
   const meta = strokes.map((s, i) => {
     const m = [s.c, s.w, s.t, s.o ?? null, s.p.length / 3];
     // 8・9番目(種類・文字ペンのフチ)、10・11番目(画像)、12番目(おまけ: ぼかし・濃さ)も後から足した
     // 塗り・スプレーは置いてあるレイヤーも持つ: 'f'=線画 / 'fu'=塗り / 'fs'=影 / 'fh'=白 / 'fx'=文字
     const lay = s.u ? 'u' : s.s ? 's' : s.h ? 'h' : s.x ? 'x' : '';
-    const kind = s.k === 'f' ? 'f' + lay : s.k === 'd' ? 'd' + lay : s.k === 'i' ? 'i' : lay || null;
+    const kind = s.k === 'f' ? 'f' + lay : s.k === 'd' ? 'd' + lay : s.k === 'r' ? 'r' + lay : s.k === 'i' ? 'i' : lay || null;
     const ext = {};
     if (s.bl > 0) ext.bl = s.bl;
     if (s.a !== undefined) ext.a = s.a;
@@ -438,6 +445,7 @@ export async function encodePage(strokes) {
     if (s.of !== undefined || s.og !== undefined || kind || hasExt) m.push(s.of ?? null, s.og ?? null);
     if (kind || hasExt) m.push(kind, s.b ?? 0);
     if (kind === 'i') m.push(imgs[i]?.byteLength || 0, s.img?.type || 'image/webp');
+    else if (s.k === 'r') m.push(imgs[i]?.byteLength || 0, 'image/png');
     else if (hasExt) m.push(0, null);
     if (hasExt) m.push(ext);
     return m;
@@ -503,8 +511,8 @@ export async function decodePage(ab) {
     if (of !== null && of !== undefined) st.of = of;
     if (og !== null && og !== undefined) st.og = og;
     if (kind && kind !== 'i') {
-      // 先頭が 'f'(塗り)・'d'(スプレー)なら種類、残りがレイヤー
-      const k0 = kind[0] === 'f' || kind[0] === 'd' ? kind[0] : '';
+      // 先頭が 'f'(塗り)・'d'(スプレー)・'r'(画像の段)なら種類、残りがレイヤー
+      const k0 = kind[0] === 'f' || kind[0] === 'd' || kind[0] === 'r' ? kind[0] : '';
       if (k0) st.k = k0;
       const lay = kind.slice(k0.length);
       if (lay === 'u') st.u = 1;
@@ -514,10 +522,10 @@ export async function decodePage(ab) {
     }
     if (ext?.bl > 0) st.bl = ext.bl;
     if (ext?.a !== undefined && ext.a !== null) st.a = ext.a;
-    if (kind === 'i') {
-      st.k = 'i';
-      st.img = new Blob([buf.slice(off, off + ilen)], { type: itype || 'image/webp' });
-      off += ilen;
+    if (kind === 'i' || st.k === 'r') {
+      if (kind === 'i') st.k = 'i';
+      st.img = new Blob([buf.slice(off, off + (ilen || 0))], { type: itype || (st.k === 'r' ? 'image/png' : 'image/webp') });
+      off += ilen || 0;
     }
     strokes.push(st);
   }

@@ -10,7 +10,11 @@
               s?:1 なら影(影ペン・影の塗り)。線画の上に乗算で重ねる,
               h?:1 なら白(白ペン・白の塗り)。線画・影の上、文字の下に描く,
               k?:'d' ならスプレーの粒。p は [x, y, 粒の半径/(w/2), …]、w はスプレーの直径,
+              k?:'r' なら画像の段(塗り・影・白)。ページごと・段ごとに1枚。p はページの左上と右下、
+                    img に PNG(保存・同期用)、cv に編集・表示用のキャンバス(半分の解像度),
               bl?:ぼかし(page-px。ブラウザの blur の半径), a?:濃さ(0..1。半透明で重ねる) }
+   - 塗り・影・白は画像の段(k:'r')。前の版の線データ(塗りペンの線・影ペンの線・白ペンの線・塗る先が塗り/影/白の塗り)は、
+     その段を初めて編集したときに画像へ焼き込む(それまでは線のまま描く)
    - レイヤー(段)は 塗り(u) → 影(s) → 線画(ふつうの線・塗り・画像) → 白(h) → 文字(x)。配列もこの順に並べておく(addStrokes)。
      描くときは 塗り → 線画 → 影(乗算) → 白 → 文字 の順(影は線画の後に乗算で重ねるので、黒い線は黒いまま残る)
    - 文字ペンの線は、ほかの線・塗りより必ず上に描く。フチ(白)を全部描いてから中身を描くので、
@@ -219,14 +223,21 @@ export const bandOf = (st) => (st.u ? 0 : st.s ? 1 : st.h ? 3 : st.x ? 4 : 2);
 const DRAW_ORDER = [0, 2, 1, 3]; // 描く順(文字は最後に別扱い)。影は線画の後に乗算で重ねる
 
 /** 線の並びを描く。文字ペンの線は最後に、フチ → 中身 の順でまとめて描く。
- *  skip: 描かない線の Set(動かしている最中の線など) */
-export function drawStrokes(ctx, strokes, thicken = 0, skip = null) {
+ *  skip: 描かない線の Set(動かしている最中の線など)。
+ *  opt.swap: 画像の段の差し替え(Map: 段の画像 → 代わりに描く物。囲んで動かしている間の穴あき画像)。
+ *  opt.live: 描いている最中の塗り・影・白の線 { st, erase, box }。その段の画像とまとめて(グループにして)から重ねる。
+ *            影の乗算が、描きかけの線と既にある影の重なりで二重に掛からないように */
+export function drawStrokes(ctx, strokes, thicken = 0, skip = null, opt = null) {
   const bands = [null, null, null, null, null];
   for (const st of strokes) {
     if (skip && skip.has(st)) continue;
-    (bands[bandOf(st)] ||= []).push(st);
+    (bands[bandOf(st)] ||= []).push(opt?.swap?.get(st) || st);
   }
-  for (const b of DRAW_ORDER) if (bands[b]) for (const st of bands[b]) drawStroke(ctx, st, thicken);
+  const liveBand = opt?.live ? bandOf(opt.live.st) : -1;
+  for (const b of DRAW_ORDER) {
+    if (b === liveBand) { drawLiveGroup(ctx, bands[b] || [], opt.live); continue; }
+    if (bands[b]) for (const st of bands[b]) drawStroke(ctx, st, thicken);
+  }
   const text = bands[4];
   if (!text) return;
   // 文字レイヤーの塗り(フキダシの中など)は文字より下に。文字の線が塗りに隠れないように
@@ -261,11 +272,13 @@ function bitmapOf(st) {
   }
   return null;
 }
-/** 画像を全部読み込んでおく(書き出し・塗りつぶしの前に) */
-export function ensureImages(strokes) {
+/** 画像(取り込んだ画像・画像の段)を全部読み込んでおく(書き出し・塗りつぶし・ページを開く前に) */
+export function ensureImages(strokes, rastersOnly = false) {
   const waits = [];
   for (const st of strokes) {
-    if (st.k !== 'i') continue;
+    if (st.k !== 'r' && (rastersOnly || st.k !== 'i')) continue;
+    if (st.k === 'r' && st.cv) continue;
+    if (!st.img && st.enc) { waits.push(st.enc.then(() => (st.cv ? null : ensureImages([st])))); continue; }
     bitmapOf(st);
     const v = bitmaps.get(st.img);
     if (v instanceof Promise) waits.push(v);
@@ -286,6 +299,125 @@ export function makeImage(blob, x0, y0, x1, y1) {
   return { c: '#000000', w: 0, t: 0, k: 'i', img: blob, p: new Float32Array([x0, y0, 0, x1, y0, 0, x1, y1, 0, x0, y1, 0]) };
 }
 
+/* ---- 画像の段(塗り・影・白) ----
+   ページごと・段ごとに1枚の画像(半分の解像度)。段の中は普通に重ね(同じ色なら何回塗っても濃くならない)、
+   段まるごとを ふつう(塗り・白)/乗算(影) でページに重ねる。
+   - 編集するたびに新しいオブジェクト(新しいキャンバス)を作る。古いオブジェクトは取り消し用に PNG だけ持つ
+   - 表示・編集には cv(キャンバス)、無ければ img(PNG)を展開した ImageBitmap を使う */
+export const isRaster = (st) => st.k === 'r';
+/** 画像の段のオブジェクトを作る。L: 'u' | 's' | 'h'、cv: キャンバス、W,H: ページの大きさ */
+export function makeRaster(L, cv, W, H) {
+  return { c: '#000000', w: 0, t: 0, k: 'r', [L]: 1, p: new Float32Array([0, 0, 0, W, H, 0]), img: null, cv };
+}
+/** 表示に使う画素(キャンバスか展開済みの画像)。まだ無ければ展開を始めて null */
+export function rasterSource(st) {
+  return st.cv || (st.img ? bitmapOf(st) : null);
+}
+/** 保存用の PNG を作り始める(toBlob は呼んだ時点の画素を写すので、この後キャンバスを変えてもよい)。
+ *  force: 作り直す(なぞっている途中に保存で PNG を作っていたら、その後の変更が入っていないので)。
+ *  遅れて届いた古い PNG で上書きしないよう、番号(gen)で見分ける */
+export function startEncode(st, force = false) {
+  if (force) { st.img = null; st.enc = null; }
+  if (st.img || st.enc || !st.cv) return st.enc;
+  const cv = st.cv, gen = (st.gen = (st.gen || 0) + 1);
+  st.enc = new Promise((res) => cv.toBlob((b) => { if (st.gen === gen) st.img = b; res(b); }, 'image/png'));
+  return st.enc;
+}
+/** 保存・同期用の PNG(できるまで待つ) */
+export async function rasterBlob(st) {
+  if (st.img) return st.img;
+  if (!st.enc) startEncode(st);
+  return st.enc ? st.enc : null;
+}
+/** 表示用の画素を手放す(PNG は残す。取り消し・同じ物を使うほかのページでは、要るときに展開し直す)。
+ *  ページから外れた古い版に使う。PNG がまだ無ければ作ってから手放す */
+export function releaseRaster(st) {
+  if (st.k !== 'r') return;
+  st.retired = true;
+  if (!st.img && !st.enc && st.cv) startEncode(st);
+  const drop = () => {
+    st.cv = null;
+    const bm = st.img && bitmaps.get(st.img);
+    if (bm && !(bm instanceof Promise) && bm !== 'bad') bm.close?.();
+    if (st.img) bitmaps.delete(st.img);
+  };
+  if (st.img) drop();
+  else if (st.enc) st.enc.then(() => { if (st.retired) drop(); });
+}
+/** 取り消し・やり直しでページに戻った段は、手放す予定を取り消す */
+export function adoptRasters(strokes) {
+  for (const st of strokes) if (st.k === 'r') st.retired = false;
+}
+/** 保存(IndexedDB・ほかのネームへ送る)用に、画像の段を PNG だけの形にする */
+export async function persistStrokes(strokes) {
+  const out = [];
+  for (const st of strokes) {
+    if (st.k !== 'r') { out.push(st); continue; }
+    const img = await rasterBlob(st);
+    if (!img) continue;
+    const { cv, enc, retired, gen, ...rest } = st;
+    out.push({ ...rest, img });
+  }
+  return out;
+}
+function drawRaster(ctx, st) {
+  const src = rasterSource(st);
+  if (!src) return;
+  const p = st.p;
+  ctx.save();
+  if (st.s) ctx.globalCompositeOperation = 'multiply';
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = 'high';
+  ctx.drawImage(src, p[0], p[1], p[3] - p[0], p[4] - p[1]);
+  ctx.restore();
+}
+/** 線(輪郭・塗り・粒)を、段の画像に焼き込む形で描く。段の重ね方(乗算)は使わず、ふつう/消す(erase)で */
+export function paintInto(ctx, st, erase = false) {
+  ctx.save();
+  ctx.globalCompositeOperation = erase ? 'destination-out' : 'source-over';
+  if (st.a !== undefined && st.a < 1) ctx.globalAlpha *= Math.max(0, st.a);
+  if (st.bl > 0) {
+    const r = st.bl * scaleOf(ctx);
+    if (r >= 0.3) ctx.filter = `blur(${r.toFixed(2)}px)`;
+  }
+  if (isOpacityStroke(st)) {
+    // 前の版の「筆圧で濃さ」の線(塗り・影・白には無いはずだが念のため): 白と混ぜた色のままふつうに描く
+    const g = buildGroups(st, toInput(st.p));
+    for (const { color, path } of g) { ctx.fillStyle = color; ctx.fill(path); }
+  } else drawBody(ctx, st, 0);
+  ctx.restore();
+}
+/** 描いている最中の線と、その段の画像を、別のキャンバスでまとめてから重ねる(drawStrokes の opt.live) */
+let groupCv = null;
+function drawLiveGroup(ctx, band, live) {
+  const m = ctx.getTransform();
+  const [x0, y0, x1, y1] = live.box;
+  const dx0 = Math.max(0, Math.floor(m.a * x0 + m.e)), dy0 = Math.max(0, Math.floor(m.d * y0 + m.f));
+  const dx1 = Math.min(ctx.canvas.width, Math.ceil(m.a * x1 + m.e)), dy1 = Math.min(ctx.canvas.height, Math.ceil(m.d * y1 + m.f));
+  const w = dx1 - dx0, h = dy1 - dy0;
+  if (w <= 0 || h <= 0) return;
+  if (!groupCv) groupCv = document.createElement('canvas');
+  if (groupCv.width < w || groupCv.height < h) {
+    groupCv.width = Math.max(groupCv.width, w);
+    groupCv.height = Math.max(groupCv.height, h);
+  }
+  const g = groupCv.getContext('2d');
+  g.setTransform(1, 0, 0, 1, 0, 0);
+  g.clearRect(0, 0, w, h);
+  g.setTransform(m.a, m.b, m.c, m.d, m.e - dx0, m.f - dy0);
+  // 段の中は普通に重ねる(画像の段も、まだ焼き込んでいない前の版の線も)
+  for (const st of band) {
+    if (st.k === 'r') { const src = rasterSource(st); if (src) g.drawImage(src, st.p[0], st.p[1], st.p[3] - st.p[0], st.p[4] - st.p[1]); }
+    else paintInto(g, st);
+  }
+  paintInto(g, live.st, live.erase);
+  ctx.save();
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  if (live.st.s) ctx.globalCompositeOperation = 'multiply';
+  ctx.drawImage(groupCv, 0, 0, w, h, dx0, dy0, w, h);
+  ctx.restore();
+}
+
 /** 今の変換行列の倍率(page-px → canvas-px) */
 const scaleOf = (ctx) => { const m = ctx.getTransform(); return Math.hypot(m.a, m.b); };
 const hasStyle = (st) => st.s || st.bl > 0 || (st.a !== undefined && st.a < 1);
@@ -293,6 +425,7 @@ const hasStyle = (st) => st.s || st.bl > 0 || (st.a !== undefined && st.a < 1);
 /** thicken: 輪郭をこの太さで縁取って太らせる(縮小サムネ用)。
  *  影は乗算で重ねる。ぼかしはブラウザの blur で(変換行列が効かないので倍率を掛ける)。濃さは半透明で */
 export function drawStroke(ctx, st, thicken = 0) {
+  if (st.k === 'r') { drawRaster(ctx, st); return; }
   if (!hasStyle(st)) { drawBody(ctx, st, thicken); return; }
   ctx.save();
   if (st.s) ctx.globalCompositeOperation = 'multiply';
@@ -386,6 +519,7 @@ export function hitStroke(st, x, y, r) {
   if (x + r < b[0] || x - r > b[2] || y + r < b[1] || y - r > b[3]) return false;
   if (st.k === 'f') return inFill(st, x, y) || fillEdgeNear(st, x, y, r);
   if (st.k === 'i') return true; // 外接矩形 = 画像の範囲
+  if (st.k === 'r') return false; // 画像の段は線として拾わない(消しゴム・囲んで動かすで別扱い)
   if (st.k === 'd') return dotsHit(st, x, y, r, 1) >= 0;
 
   const p = st.p;
@@ -404,7 +538,7 @@ export function hitStroke(st, x, y, r) {
  *  触れていなければ null。点の間隔が粗いと削れ方が粗くなるので、
  *  触れた線だけ細かく補間してから判定する */
 export function eraseSplit(st, x, y, r) {
-  if (st.k === 'f' || st.k === 'i') return null; // 塗りの部分消しは別扱い(消しゴムを離したときに削る)。画像は消さない
+  if (st.k === 'f' || st.k === 'i' || st.k === 'r') return null; // 塗りの部分消しは別扱い(消しゴムを離したときに削る)。画像は消さない
   if (!hitStroke(st, x, y, r)) return null;
   if (st.k === 'd') {
     // スプレー: 円に入った粒だけを消す(残りの粒の位置は変わらない)
@@ -477,6 +611,7 @@ export function pointInPoly(x, y, poly) {
 
 /** 線の点のうち、多角形の中にある割合(0..1)。pb は多角形の外接矩形 [x0,y0,x1,y1] */
 export function fractionInPoly(st, poly, pb) {
+  if (st.k === 'r') return 0;
   const b = bbox(st);
   if (!bboxHit(b, pb[0], pb[1], pb[2], pb[3])) return 0;
   const p = st.p;
