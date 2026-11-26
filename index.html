@@ -19,7 +19,7 @@
 <!-- Dropbox連携の共通ライブラリ(無改造で利用)。読み込めなければローカルのみで動く -->
 <link rel="stylesheet" href="https://moyorieki.github.io/storage-bridge/storage-bridge.css">
 <script src="https://moyorieki.github.io/storage-bridge/storage-bridge.js"></script>
-<link rel="stylesheet" href="css/app.css?v=30">
+<link rel="stylesheet" href="css/app.css?v=31">
 <title>ネームビルダー</title>
 </head>
 <body>
@@ -71,6 +71,9 @@
   <nav id="dock" class="dock">
     <div id="penSlots"></div>
     <button id="eraserBtn" class="tool" type="button" title="消しゴム (E)"><span class="eraser-ico"></span></button>
+    <button id="blurBtn" class="tool" type="button" title="ぼかし (R)：塗り・影・白の、なぞった所をぼかす。2回タップで大きさ・強さ・対象">
+      <span class="blur-ico"></span><span class="pen-w"></span>
+    </button>
     <button id="underPenBtn" class="tool" type="button" title="塗りペン (U)：いつも一番下に描かれる（線の下を塗る）。2回タップで設定">
       <span class="under-ico"></span><span class="pen-w"></span>
     </button>
@@ -174,6 +177,24 @@
     <label><input type="radio" name="eraseTarget" value="auto"> 直前のペン <span id="eraseAutoNote" class="muted small"></span></label>
   </div>
   <p class="muted small">線画＝ペン1〜3とバケツの塗り、塗り＝塗りペン、影＝影ペン、白＝白ペン、文字＝文字ペン（バケツで塗った塗りは塗る先のレイヤー）。ボタン左上の印をタップしても切り替えられる（全部→線画→塗り→影→白→文字の順。灰「線」／橙「塗」／紫「影」／水色「白」／青「文」／「全」。点線で囲んだ印は直前のペンに合わせている）。消しゴムの円の色も対象のレイヤーの色になる。画像は消しゴムでは消えない</p>
+  <div class="actions"><button class="btn" type="button" data-close>閉じる</button></div>
+</dialog>
+
+<!-- ============ ぼかしの設定 ============ -->
+<dialog id="blurDlg" class="pop">
+  <h2>ぼかし</h2>
+  <label class="row col">大きさ <span><output id="blurSizeOut"></output> px</span>
+    <input id="blurSize" type="range" min="10" max="300" step="2"></label>
+  <label class="row col">強さ <span class="muted small">1回なぞったときのぼけ方。何度もなぞると、よりぼける</span> <span><output id="blurStrOut"></output></span>
+    <input id="blurStr" type="range" min="2" max="40" step="1"></label>
+  <div class="row">ぼかすレイヤー</div>
+  <div class="seg">
+    <label><input type="radio" name="blurTarget" value="all"> 全部</label>
+    <label><input type="radio" name="blurTarget" value="u"> 塗り</label>
+    <label><input type="radio" name="blurTarget" value="s"> 影</label>
+    <label><input type="radio" name="blurTarget" value="h"> 白</label>
+  </div>
+  <p class="muted small">ぼかせるのは画像で持っている 塗り・影・白 だけ（線画・文字は線のデータなのでぼかせない）。全部＝塗り・影・白をまとめて。ボタン左上の印をタップしても 全部→塗り→影→白 の順に切り替わる。</p>
   <div class="actions"><button class="btn" type="button" data-close>閉じる</button></div>
 </dialog>
 
@@ -412,6 +433,6 @@
 </script>
 <!-- 版番号(?v=)は css/js を変えるたびに index.html と js/app.js の両方で上げる。
      新旧のファイルが混ざって読み込みに失敗するのを防ぐため -->
-<script type="module" src="js/app.js?v=30"></script>
+<script type="module" src="js/app.js?v=31"></script>
 </body>
 </html>

@@ -134,6 +134,11 @@ button { font: inherit; color: inherit; }
 }
 .shadow-ico { color: #2b3036; box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.18); }
 .white-ico { background: #5b6168; color: #fff; text-shadow: 0 0 3px rgba(255, 255, 255, 0.9); }
+/* ぼかし: ふちがぼけた丸 */
+.blur-ico {
+  width: 24px; height: 24px; border-radius: 50%; display: block; margin-bottom: 6px;
+  background: radial-gradient(circle, #6b7178 0 30%, rgba(107, 113, 120, 0.45) 55%, rgba(107, 113, 120, 0) 72%);
+}
 .fill-dot {
   position: absolute; right: 6px; bottom: 6px; width: 14px; height: 14px; border-radius: 50%;
   box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.2), 0 0 0 2px #fff;
@@ -173,14 +178,17 @@ button { font: inherit; color: inherit; }
 #editor.vbar .pagenav { flex-direction: column; gap: 2px; margin: 4px 0; }
 #editor.vbar .pagenav .ibtn { height: 32px; }
 #editor.vbar .pill { padding: 0 6px; font-size: 12px; height: 28px; }
-/* 道具が13個あるので、横向きタブレット(高さ900px程度)に収まるよう縦バーでは少し詰める */
+/* 道具が14個あるので、横向きタブレット(高さ900px程度)に収まるよう縦バーでは少し詰める */
 #editor.vbar .dock {
   position: static; box-shadow: none; background: transparent; border-radius: 0;
   padding: 6px 0 0; margin-top: 4px; border-top: 1px solid var(--line); align-items: center; gap: 2px;
 }
 #editor.vbar #penSlots { gap: 2px; }
-#editor.vbar .tool { width: 50px; height: 42px; }
+#editor.vbar .tool { width: 50px; height: 38px; }
 #editor.vbar .tool.small { height: 28px; }
+#editor.vbar .text-ico { font-size: 19px; margin-bottom: 9px; }
+#editor.vbar .shadow-ico, #editor.vbar .white-ico { width: 21px; height: 21px; font-size: 13px; margin-bottom: 9px; }
+#editor.vbar .blur-ico { width: 21px; height: 21px; margin-bottom: 8px; }
 #editor.vbar.side-right .zoom-pill { right: auto; left: 12px; }
 .toast {
   position: absolute; left: 50%; bottom: 24px; transform: translateX(-50%); z-index: 30;

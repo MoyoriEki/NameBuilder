@@ -6,13 +6,15 @@
    - 描画中の線だけは重ねキャンバス(#live)に描き、
      ペンを離したらページのキャッシュへ焼き込む
    ============================================================ */
-import * as db from './db.js?v=30';
+import * as db from './db.js?v=31';
 import { drawStroke, drawStrokes, addStrokes, drawLiveStroke, isOpacityStroke, opacityAt, bbox, bboxHit, hitStroke, eraseSplit, sweep,
   fractionInPoly, topStrokeAt, unionBox, transformStroke, pointInPoly, strokePath,
-  ensureImages, setImageReady, makeImage, sprayer, seededRandom, primeDots } from './ink.js?v=30';
-import { bucketFill, polygonFill, subtractCircles } from './fill.js?v=30';
-import { pngWithDpi, makeZip } from './zip.js?v=30';
-import * as cloud from './cloud.js?v=30';
+  ensureImages, setImageReady, makeImage, sprayer, seededRandom, primeDots,
+  makeRaster, rasterSource, startEncode, releaseRaster, adoptRasters, persistStrokes, paintInto } from './ink.js?v=31';
+import { layerCanvas, copyLayer, pageCtx, eraseDab, blurDab, extractPoly, clearPoly, pasteFloat } from './raster.js?v=31';
+import { bucketFill, polygonFill, subtractCircles } from './fill.js?v=31';
+import { pngWithDpi, makeZip } from './zip.js?v=31';
+import * as cloud from './cloud.js?v=31';
 
 const PAGE_W = 2508, PAGE_H = 3541, DPI = 350;
 const GAP = 140;                 // ページ間の隙間(page-px)
@@ -52,6 +54,8 @@ const DEFAULTS = {
   eraseTarget: 'all', // 消しゴムが消すレイヤー: all=全部 / n=線画 / u=塗り / s=影 / h=白 / x=文字 / auto=直前に使ったペンのレイヤー
   selTarget: 'all',   // 範囲選択・移動で選ぶレイヤー(同上)
   eraserSize: 40,
+  // ぼかし(塗り・影・白の画素をなぞってぼかす)。size = 大きさ(直径 px)、str = 強さ(1回のぼけ方 px)、target = 対象(all / u / s / h)
+  blur: { size: 80, str: 10, target: 'all' },
   selMode: 'lasso',   // 選択ツール: lasso=投げ縄 / rect=四角
   stab: 0.3,
   gamma: 1.0,
@@ -87,6 +91,8 @@ const settings = (() => {
   s.fill = { ...DEFAULTS.fill, ...s.fill };
   s.fill.ref = { ...DEFAULTS.fill.ref, ...s.fill.ref };
   if (!['n', 'u', 's', 'h', 'x'].includes(s.fill.layer)) s.fill.layer = 'n';
+  s.blur = { ...DEFAULTS.blur, ...s.blur };
+  if (!['all', 'u', 's', 'h'].includes(s.blur.target)) s.blur.target = 'all';
   return s;
 })();
 const saveSettings = () => localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
@@ -142,7 +148,7 @@ function pageState(id) {
 setImageReady(() => {
   if (!E) return;
   for (const ps of E.pages.values()) {
-    if (ps.strokes?.some((st) => st.k === 'i')) ps.rev++;
+    if (ps.strokes?.some((st) => st.k === 'i' || st.k === 'r')) ps.rev++;
   }
   requestRender();
 });
@@ -150,10 +156,13 @@ function ensureLoaded(id) {
   const ps = pageState(id);
   if (ps.strokes || ps.loading) return;
   const doc = E.doc;
-  ps.loading = db.getPage(doc.id, id).then((rec) => {
+  ps.loading = db.getPage(doc.id, id).then(async (rec) => {
+    const strokes = rec?.strokes || [];
+    // 塗り・影・白の画像は展開し終わってから出す(出した後に塗りがぱっと現れないように)
+    await ensureImages(strokes, true).catch(() => {});
     ps.loading = null;
     if (E?.doc !== doc) return;
-    if (!ps.strokes) { ps.strokes = rec?.strokes || []; ps.rev++; }
+    if (!ps.strokes) { ps.strokes = strokes; ps.rev++; }
     requestRender();
   }).catch((err) => { ps.loading = null; console.error(err); toast('ページの読み込みに失敗した'); });
 }
@@ -433,7 +442,7 @@ function buildCache(id, ps, scale) {
   ctx.setTransform(1, 0, 0, 1, 0, 0);
   ctx.clearRect(0, 0, w, h);
   ctx.setTransform(scale, 0, 0, scale, 0, 0);
-  drawStrokes(ctx, ps.strokes, 0, ps.hidden);
+  drawStrokes(ctx, ps.strokes, 0, ps.hidden, ps.swap ? { swap: ps.swap } : null);
   applyCuts(ctx, id);
   c.rev = ps.rev;
   return c;
@@ -492,7 +501,8 @@ function drawPage(ctx, i, ox, oy, k) {
     ctx.rect(0, 0, PAGE_W, PAGE_H);
     ctx.clip();
     const hid = ps.hidden;
-    drawStrokes(ctx, ps.strokes.filter((st) => (!hid || !hid.has(st)) && bboxHit(bbox(st), vx0, vy0, vx1, vy1)));
+    drawStrokes(ctx, ps.strokes.filter((st) => (!hid || !hid.has(st)) && bboxHit(bbox(st), vx0, vy0, vx1, vy1)), 0, null,
+      ps.swap ? { swap: ps.swap } : null);
     applyCuts(ctx, id);
     ctx.restore();
   } else {
@@ -584,6 +594,7 @@ function housekeep(i0, i1) {
     };
     for (const [id, ps] of loaded) {
       if (near(id) || E.dirty.has(id) || drawing?.pageId === id || sel?.pageId === id) continue;
+      for (const st of ps.strokes) releaseRaster(st); // 塗り・影・白の画素も手放す(PNG は残る)
       ps.strokes = null;
       ps.rev++;
       const c = caches.get(id);
@@ -641,8 +652,7 @@ function drawLive() {
     tctx.rect(0, 0, PAGE_W, PAGE_H);
     tctx.clip();
     const pts = drawing.pred.length ? drawing.pts.concat(drawing.pred) : drawing.pts;
-    if (drawing.st.s) drawShadowLive(tctx, drawing, pts);
-    else if (drawing.st.h) drawWhiteLive(tctx, drawing, pts);
+    if (isRasterLayer(layerOf(drawing.st))) drawRasterLive(tctx, drawing, pts);
     else {
       // 文字ペン: 描いている線のフチが、もう書いてある文字を隠さないように中身を描き直す
       const under = drawing.st.x ? () => {
@@ -650,23 +660,16 @@ function drawLive() {
       } : null;
       drawLiveStroke(tctx, drawing.st, pts, false, under);
     }
-    // 塗りペン: 描いている線の上に、その辺りのほかの線を描き直す(離す前から線画の下に見える)
-    if (drawing.st.u) {
-      let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
-      for (const q of pts) { x0 = Math.min(x0, q[0]); y0 = Math.min(y0, q[1]); x1 = Math.max(x1, q[0]); y1 = Math.max(y1, q[1]); }
-      const r = drawing.st.w;
-      const over = (pageState(drawing.pageId).strokes || []).filter((st) => !st.u && bboxHit(bbox(st), x0 - r, y0 - r, x1 + r, y1 + r));
-      if (over.length) drawStrokes(tctx, over);
-    }
     tctx.restore();
     if (settings.lowLatency) inkCv.style.visibility = 'visible';
   }
   drawSelOverlay(ctx);
   if (cursor) {
-    // 消しゴムの円。色で消す対象のレイヤーが分かる
+    // 消しゴム・ぼかしの円。色で対象のレイヤーが分かる。ぼかしは点線
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    const r = (settings.eraserSize / 2) * cam.z;
-    const L = LAYERS[eraseLayer() || 'all'];
+    const blur = erasing ? erasing.mode === 'blur' : isBlurTool();
+    const r = brushRadius(blur ? 'blur' : 'erase') * cam.z;
+    const L = blur ? LAYERS[settings.blur.target] : LAYERS[eraseLayer() || 'all'];
     ctx.beginPath();
     ctx.arc(cursor.x, cursor.y, Math.max(2, r), 0, Math.PI * 2);
     ctx.lineWidth = 3;
@@ -674,16 +677,19 @@ function drawLive() {
     ctx.stroke();
     ctx.lineWidth = 1.5;
     ctx.strokeStyle = L.ring;
+    if (blur) ctx.setLineDash([5, 4]);
     ctx.stroke();
+    ctx.setLineDash([]);
   }
 }
 
-/** 影(描画中): 重ねキャンバスは下と普通に重なるだけなので、影をそのまま載せると線を隠してしまう。
- *  描いている線の範囲だけ「紙＋全部のレイヤー(描きかけの影を差し込んだもの)」を描き直して載せる。
- *  離したときとまったく同じ見た目になる。ctx はページ座標 */
-function drawShadowLive(ctx, d, pts) {
+/** 塗り・影・白(描画中): 重ねキャンバスは下と普通に重なるだけなので、そのまま載せると線を隠してしまう。
+ *  描いている線の範囲だけ「紙＋全部の段」を描き直して載せる。描いている線はその段の画像とまとめてから
+ *  段の重ね方(影は乗算)で重ねるので、離したときとまったく同じ見た目になる。ctx はページ座標 */
+function drawRasterLive(ctx, d, pts) {
   const st = liveStroke(d, pts);
   if (!st.p.length) return;
+  if (d.spray) primeDots(st, d.spray.path); // 粒の形は出すたびに足してあるので、毎回作り直さない
   const b = bbox(st);
   ctx.save();
   ctx.beginPath();
@@ -692,18 +698,8 @@ function drawShadowLive(ctx, d, pts) {
   ctx.fillStyle = '#fff';
   ctx.fillRect(b[0], b[1], b[2] - b[0], b[3] - b[1]);
   const near = (pageState(d.pageId).strokes || []).filter((q) => bboxHit(bbox(q), b[0], b[1], b[2], b[3]));
-  drawStrokes(ctx, addStrokes(near, [st]));
+  drawStrokes(ctx, near, 0, null, { live: { st, box: b } });
   ctx.restore();
-}
-/** 白(描画中): 白は文字の下なので、白を載せてから、その辺りの文字を描き直す(塗りペンと同じやり方) */
-function drawWhiteLive(ctx, d, pts) {
-  const st = liveStroke(d, pts);
-  if (!st.p.length) return;
-  if (d.spray) primeDots(st, d.spray.path); // 粒の形は出すたびに足してあるので、毎回作り直さない
-  drawStroke(ctx, st);
-  const b = bbox(st);
-  const over = (pageState(d.pageId).strokes || []).filter((q) => q.x && bboxHit(bbox(q), b[0], b[1], b[2], b[3]));
-  if (over.length) drawStrokes(ctx, over);
 }
 
 /** 濃さが変わる線(描画中)は、重ねキャンバスを使わず画面(view)に直接、増えた区間だけ描き足す。
@@ -748,28 +744,48 @@ function setPageStrokes(pageId, arr) {
   markDirty(pageId);
   return true;
 }
+/** 履歴の1手を当てる(undo: before に、redo: after に)。塗り・影・白の画像は、
+ *  手放してあれば展開し終わってから差し替える(差し替えた直後に塗りが消えて見えないように) */
+let historyBusy = false;
+async function applyHistory(ent, back) {
+  historyBusy = true;
+  try {
+    const target = (e) => (back ? e.before : e.after);
+    await Promise.all(ent.map((e) => ensureImages(target(e), true))).catch(() => {});
+    if (!E) return;
+    for (const e of ent) {
+      const next = target(e), prev = pageState(e.pageId).strokes || (back ? e.after : e.before);
+      adoptRasters(next);
+      if (setPageStrokes(e.pageId, next)) {
+        retireRasters(prev, next);
+        revealPage(e.pageId);
+      }
+    }
+  } finally { historyBusy = false; }
+  updateUndoUI();
+  requestRender();
+}
 function undo() {
-  if (!E || drawing || erasing || selOp) return;
+  if (!E || drawing || erasing || selOp || historyBusy) return;
   clearSel();
   const ent = E.undo.pop();
   if (!ent) return;
-  let jumped = false;
-  for (const e of ent) if (setPageStrokes(e.pageId, e.before)) jumped ||= revealPage(e.pageId);
   E.redo.push(ent);
-  updateUndoUI();
-  requestRender();
-  toast('元に戻した');
+  applyHistory(ent, true).then(() => toast('元に戻した'));
 }
 function redo() {
-  if (!E || drawing || erasing || selOp) return;
+  if (!E || drawing || erasing || selOp || historyBusy) return;
   clearSel();
   const ent = E.redo.pop();
   if (!ent) return;
-  for (const e of ent) if (setPageStrokes(e.pageId, e.after)) revealPage(e.pageId);
   E.undo.push(ent);
-  updateUndoUI();
-  requestRender();
-  toast('やり直した');
+  applyHistory(ent, false).then(() => toast('やり直した'));
+}
+/** ページから外れた塗り・影・白の画像の、表示用の画素を手放す */
+function retireRasters(before, after) {
+  if (!before) return;
+  const keep = new Set(after);
+  for (const st of before) if (st.k === 'r' && !keep.has(st)) releaseRaster(st);
 }
 /** 変更が画面外のページなら、そのページを見せる */
 function revealPage(pageId) {
@@ -819,7 +835,7 @@ async function flushSave() {
   for (const id of ids) {
     const ps = st.pages.get(id);
     if (!ps?.strokes) continue;
-    recs.push([id, { strokes: ps.strokes }]);
+    recs.push([id, { strokes: await persistStrokes(ps.strokes) }]);
     thumbs.push([id, await makeThumb(id, ps)]);
   }
   st.saving = db.savePages(st.doc, recs, thumbs)
@@ -876,6 +892,78 @@ const LAYERS = {
 };
 const TARGETS = ['all', 'n', 'u', 's', 'h', 'x']; // 印をタップしたときの切り替え順(直前のペンは設定ダイアログからだけ選べる)
 const layerOf = (st) => (st.u ? 'u' : st.s ? 's' : st.h ? 'h' : st.x ? 'x' : 'n');
+/* ---- 画像の段(塗り・影・白) ----
+   塗り・影・白は、ページごと・段ごとに1枚の画像で持つ(ink.js の k:'r'・raster.js)。
+   前の版の線データ(塗りペンの線など)は、その段を初めて編集するときに画像へ焼き込む(rasterBase)。
+   編集するたびに段の画像を写した新しいオブジェクトを作り、古い方は取り消し用に PNG だけ残す */
+const RASTER_LAYERS = ['u', 's', 'h'];
+const isRasterLayer = (L) => RASTER_LAYERS.includes(L);
+const rasterIn = (strokes, L) => strokes.find((st) => st.k === 'r' && layerOf(st) === L) || null;
+/** 段 L の画像。前の版の線データがあれば、ここで画像に焼き込む(見た目は変わらないので履歴にも残さず、
+ *  保存もしない。次にこのページを保存するときに画像の形で保存される)。
+ *  戻り値: 画像 / null(まだ何も無い) / undefined(画像を展開中。少し待ってからもう一度) */
+function rasterBase(pageId, L) {
+  const ps = pageState(pageId);
+  if (!ps.strokes) return undefined;
+  const cur = rasterIn(ps.strokes, L);
+  if (cur && !rasterSource(cur)) { ensureImages([cur], true); return undefined; }
+  const legacy = ps.strokes.filter((st) => st.k !== 'r' && layerOf(st) === L);
+  if (!legacy.length) return cur;
+  const cv = copyLayer(cur, PAGE_W, PAGE_H);
+  const g = pageCtx(cv);
+  for (const st of legacy) paintInto(g, st);
+  const obj = makeRaster(L, cv, PAGE_W, PAGE_H);
+  const gone = new Set(legacy);
+  if (cur) gone.add(cur);
+  ps.strokes = addStrokes(ps.strokes.filter((st) => !gone.has(st)), [obj]);
+  ps.rev++;
+  if (cur) releaseRaster(cur);
+  return obj;
+}
+/** 段 L の画像を編集し、1手の履歴にする。paint(g, cv): g はページ座標で描ける。box: 変わった範囲(page座標) */
+function commitRaster(pageId, L, paint, box = null) {
+  const base = rasterBase(pageId, L);
+  if (base === undefined) { toast('塗りの画像を読み込み中。もう一度試して'); return null; }
+  const cv = copyLayer(base, PAGE_W, PAGE_H);
+  paint(pageCtx(cv), cv);
+  const obj = makeRaster(L, cv, PAGE_W, PAGE_H);
+  const ps = pageState(pageId);
+  const before = ps.strokes;
+  const after = base ? before.map((st) => (st === base ? obj : st)) : addStrokes(before, [obj]);
+  const c = caches.get(pageId), fresh = c && c.rev === ps.rev;
+  if (!setPageStrokes(pageId, after)) return null;
+  // ページのキャッシュは変わった所だけ描き直す
+  if (fresh && box) { redrawRegion(c, after, box); c.rev = ps.rev; }
+  startEncode(obj);
+  if (base) releaseRaster(base);
+  pushHistory([{ pageId, before, after }]);
+  requestRender();
+  return obj;
+}
+/** なぞる操作(消しゴム・ぼかし)の間だけ書き換える、段 L の作業用の画像。初めて触ったときに、段の画像を写して差し替える。
+ *  sess: { before:Map(pageId → 差し替える前の配列), work:Map('pageId:L' → { obj, base }) } */
+function rasterWork(sess, pageId, L) {
+  const key = pageId + ':' + L;
+  let w = sess.work.get(key);
+  if (w) return w.obj;
+  const base = rasterBase(pageId, L);
+  if (!base) return null; // 何も無い(消す物もぼかす物も無い)か、展開中
+  const ps = pageState(pageId);
+  if (!sess.before.has(pageId)) sess.before.set(pageId, ps.strokes);
+  const obj = makeRaster(L, copyLayer(base, PAGE_W, PAGE_H), PAGE_W, PAGE_H);
+  ps.strokes = ps.strokes.map((st) => (st === base ? obj : st));
+  w = { obj, base };
+  sess.work.set(key, w);
+  return obj;
+}
+/** なぞる操作の終わり: 作業用の画像を PNG にし始め(途中で保存していたら作り直す)、元の画像を手放す */
+function finishRasterWork(sess) {
+  for (const [key, { obj, base }] of sess.work) {
+    startEncode(obj, true);
+    releaseRaster(base);
+    markDirty(key.slice(0, key.lastIndexOf(':')));
+  }
+}
 /** 直前に使ったペンのレイヤー */
 const penLayer = () => {
   const i = Number(String(settings.lastPen).replace('pen', '')) || 0;
@@ -964,6 +1052,8 @@ function startStroke(e) {
   const pen = penOf(penIndex());
   clearSel();
   const st = penStroke(pen);
+  // 塗り・影・白: 段の画像を用意する(前の版の線データはここで画像に焼き込む)。展開中なら描かない
+  if (isRasterLayer(layerOf(st)) && rasterBase(hit.id, layerOf(st)) === undefined) { requestRender(); return false; }
   drawing = {
     id: e.pointerId,
     pageId: hit.id,
@@ -1028,6 +1118,12 @@ function endStroke(e) {
   if (!st.p.length) return;
   const ps = pageState(d.pageId);
   if (!ps.strokes) return; // 念のため(描いている間は手放さない)
+  const L = layerOf(st);
+  if (isRasterLayer(L)) {
+    // 塗り・影・白: 段の画像に焼き込む
+    if (commitRaster(d.pageId, L, (g) => paintInto(g, st), bbox(st))) markDirty(d.pageId);
+    return;
+  }
   const before = ps.strokes;
   const after = addStrokes(before, [st]);
   ps.strokes = after;
@@ -1061,25 +1157,54 @@ function cancelStroke() {
   requestLive();
 }
 
-/* ---- 消しゴム ---- */
-function startErase(e) {
+/* ---- 消しゴム・ぼかし ----
+   消しゴム: 線は線ごと/部分で消す。塗り・影・白(画像の段)は、円の中の画素を消す(ふちを少しずつ削れる)。
+   ぼかし: 塗り・影・白の画素を、なぞった所だけぼかす(線画・文字は線データなのでぼかせない)。
+   どちらも、なぞっている間は段の作業用の画像を直接書き換え、離したときに1手の履歴にする */
+function startErase(e, mode = 'erase') {
   clearSel();
   // cuts: 部分消しで塗りに当たった所。pageId -> { fills:Set, circles:[[x,y,r]] }。離したときにまとめて削る
-  erasing = { id: e.pointerId, before: new Map(), last: null, cx: e.clientX, cy: e.clientY, cuts: new Map() };
+  // work: 書き換え中の段の画像(rasterWork)
+  erasing = { id: e.pointerId, before: new Map(), work: new Map(), last: null, cx: e.clientX, cy: e.clientY, cuts: new Map(), mode };
   moveErase(e);
 }
+const isBlurTool = () => settings.tool === 'blur';
+const brushRadius = (mode) => (mode === 'blur' ? settings.blur.size : settings.eraserSize) / 2;
 function moveErase(e) {
   erasing.cx = e.clientX; erasing.cy = e.clientY;
   const evs = e.getCoalescedEvents?.() || [];
+  const blur = erasing.mode === 'blur';
+  const r = brushRadius(erasing.mode);
   for (const ev of evs.length ? evs : [e]) {
     const [wx, wy] = toWorld(ev);
-    const r = settings.eraserSize / 2;
     const samples = erasing.last ? sweep(erasing.last[0], erasing.last[1], wx, wy, r) : [[wx, wy]];
-    for (const [x, y] of samples) eraseAt(x, y, r);
+    for (const [x, y] of samples) (blur ? blurAt : eraseAt)(x, y, r);
     erasing.last = [wx, wy];
   }
   cursor = { x: e.clientX, y: e.clientY };
   requestLive();
+}
+/** ぼかし: 対象の段(全部なら塗り・影・白)の、円の中の画素をぼかす */
+function blurAt(wx, wy, r) {
+  const hit = pageAt(wx, wy);
+  if (!hit) return;
+  const ps = pageState(hit.id);
+  if (!ps.strokes) return;
+  const T = settings.blur.target;
+  let any = false;
+  for (const L of T === 'all' ? RASTER_LAYERS : [T]) {
+    const obj = rasterWork(erasing, hit.id, L);
+    if (!obj) continue;
+    blurDab(obj.cv, wx, hit.y, r, settings.blur.str);
+    any = true;
+  }
+  if (!any) return;
+  const oldRev = ps.rev;
+  ps.rev++;
+  const c = caches.get(hit.id);
+  const m = settings.blur.str * 3 + 2;
+  if (c && c.rev === oldRev) { redrawRegion(c, ps.strokes, [wx - r - m, hit.y - r - m, wx + r + m, hit.y + r + m]); c.rev = ps.rev; }
+  requestRender();
 }
 function eraseAt(wx, wy, r) {
   const hit = pageAt(wx, wy);
@@ -1089,12 +1214,20 @@ function eraseAt(wx, wy, r) {
   const x = wx, y = hit.y;
   const part = settings.eraserMode === 'part';
   const only = eraseLayer();
+  // 塗り・影・白(画像の段): 円の中の画素を消す。前の版の線データは、ここで画像に焼き込んでから消す
+  let rregion = null;
+  for (const L of only ? (isRasterLayer(only) ? [only] : []) : RASTER_LAYERS) {
+    const obj = rasterWork(erasing, hit.id, L);
+    if (!obj) continue;
+    eraseDab(obj.cv, x, y, r);
+    rregion = [x - r - 2, y - r - 2, x + r + 2, y + r + 2];
+  }
   let changed = false;
-  let region = null;
+  let region = rregion;
   const out = [];
   let cut = null;
   for (const st of ps.strokes) {
-    if (st.k === 'i') { out.push(st); continue; } // 画像は消しゴムでは消さない(選択して削除)
+    if (st.k === 'i' || st.k === 'r') { out.push(st); continue; } // 画像は消しゴムでは消さない(選択して削除)。画像の段は上で
     if (only && layerOf(st) !== only) { out.push(st); continue; } // 対象でないレイヤーは消さない
     if (part && st.k === 'f') {
       // 塗りはここでは配列から外さず、当たった円を覚えておく(見た目は applyCuts で抜く)
@@ -1131,16 +1264,17 @@ function eraseAt(wx, wy, r) {
     }
     requestRender();
   }
-  if (!changed) return;
+  if (!changed && !rregion) return;
   if (!erasing.before.has(hit.id)) erasing.before.set(hit.id, ps.strokes);
-  ps.strokes = out;
+  if (changed) ps.strokes = out;
+  const oldRev = ps.rev;
   ps.rev++;
   const c = caches.get(hit.id);
-  if (c && c.rev === ps.rev - 1) {
-    redrawRegion(c, out, region);
+  if (c && c.rev === oldRev) {
+    redrawRegion(c, ps.strokes, region);
     c.rev = ps.rev;
   }
-  markDirty(hit.id);
+  if (changed) markDirty(hit.id);
   requestRender();
 }
 function endErase() {
@@ -1159,8 +1293,9 @@ function endErase() {
     ps.rev++;
     markDirty(pageId);
   }
+  finishRasterWork(er);
   erasing = null;
-  if (er.cuts.size) requestRender();
+  if (er.cuts.size || er.work.size) requestRender();
   const entries = [...er.before].map(([pageId, before]) => ({ pageId, before, after: pageState(pageId).strokes }));
   pushHistory(entries);
   requestLive();
@@ -1173,8 +1308,10 @@ function endErase() {
    どちらも、選択中は枠の中をドラッグで移動・右下の丸をドラッグで拡大縮小・枠の外をタップで解除。
    動かしている間は、選んだ線をページのキャッシュから外して(ps.hidden)、ずらした位置に直接描く。
    離したら変形した新しい線に差し替える(1回の移動・拡大縮小 = 1手のundo)。
-   投げ縄・四角で選んだときは囲んだ形(poly)も覚えておき、塗りつぶしに使う(線が無くても選択として残る) */
-let sel = null;       // { pageId, top, strokes:[stroke], poly?:[[x,y]], box:[x0,y0,x1,y1](page座標), rev, lift?:{ax,ay,s,dx,dy} }
+   投げ縄・四角で選んだときは囲んだ形(poly)も覚えておき、塗りつぶしに使う(線が無くても選択として残る)。
+   塗り・影・白(画像の段)は、投げ縄・四角で囲んだときだけ、囲んだ中の画素が選択に入る(rasters: 段の文字の並び)。
+   動かしている間は、段を「囲んだ所を抜いた画像」(ps.swap)に差し替え、抜いた画素(floats)をずらした位置に描く */
+let sel = null;       // { pageId, top, strokes:[stroke], poly?:[[x,y]], rasters?:['u'|'s'|'h'], box:[x0,y0,x1,y1](page座標), rev, lift?:{ax,ay,s,dx,dy}, floats? }
 let selOp = null;     // { id, kind:'lasso'|'rect'|'move'|'scale'|'none', sx, sy, cx, cy, moved, … }
 let selShown = false; // 選択の枠・ボタンを表示しているか
 const HANDLE_R = 9;   // 拡大縮小ハンドルの見た目の半径(css-px)。当たりはこれより広く取る
@@ -1201,13 +1338,24 @@ function selScreenBox() {
   const [x1, y1] = pageToScreen(sel.top, b[2], b[3]);
   return [x0, y0, x1, y1];
 }
-function setSel(pageId, top, strokes, poly = null) {
+function setSel(pageId, top, strokes, poly = null, rasters = null) {
   if (!strokes.length && !poly) { clearSel(); return; }
-  sel = { pageId, top, strokes, poly, box: null, rev: pageState(pageId).rev, lift: null };
+  sel = { pageId, top, strokes, poly, rasters: poly && rasters?.length ? rasters : null, box: null, rev: pageState(pageId).rev, lift: null };
   sel.box = selBoxOf(sel);
   requestLive();
 }
-const selBoxOf = (sl) => (sl.strokes.length ? unionBox(sl.strokes) : polyBox(sl.poly));
+/** 選択の外接矩形: 線の外接矩形。囲んだ中の画素も選んでいれば、囲んだ形の外接矩形も合わせる */
+const selBoxOf = (sl) => {
+  const a = sl.strokes.length ? unionBox(sl.strokes) : null;
+  const b = sl.poly && (!a || sl.rasters) ? polyBox(sl.poly) : null;
+  return a && b ? [Math.min(a[0], b[0]), Math.min(a[1], b[1]), Math.max(a[2], b[2]), Math.max(a[3], b[3])] : a || b;
+};
+/** 範囲選択で囲んだときに、画素も選ぶ段(選ぶレイヤーが 全部 なら 塗り・影・白) */
+function selRasterLayers() {
+  const L = resolveTarget(settings.selTarget);
+  return L ? (isRasterLayer(L) ? [L] : []) : RASTER_LAYERS;
+}
+const selHasPixels = () => !!sel?.rasters?.length;
 function clearSel() {
   if (!sel) return;
   if (sel.lift) unlift();
@@ -1229,10 +1377,23 @@ function checkSel() {
   if (keep.length !== sel.strokes.length) { sel.strokes = keep; sel.box = selBoxOf(sel); }
   sel.rev = ps.rev;
 }
-/** 選んだ線をページのキャッシュから外し、動かせる状態にする */
+/** 選んだ線をページのキャッシュから外し、動かせる状態にする。
+ *  画素も選んでいれば、段ごとに囲んだ中の画素を切り出し(floats)、段は抜いた画像に差し替えて表示する */
 function lift() {
   const ps = pageState(sel.pageId);
   ps.hidden = new Set(sel.strokes);
+  sel.floats = [];
+  for (const L of sel.rasters || []) {
+    const layer = rasterBase(sel.pageId, L);
+    const src = layer && rasterSource(layer);
+    if (!src) continue;
+    const f = extractPoly(src, sel.poly);
+    if (!f) continue;
+    const hole = copyLayer(layer, PAGE_W, PAGE_H);
+    clearPoly(hole, sel.poly);
+    sel.floats.push({ L, layer, f, hole });
+  }
+  ps.swap = sel.floats.length ? new Map(sel.floats.map((x) => [x.layer, { ...x.layer, cv: x.hole }])) : null;
   ps.rev++;
   sel.rev = ps.rev;
   sel.lift = { ax: sel.box[0], ay: sel.box[1], s: 1, dx: 0, dy: 0 };
@@ -1241,6 +1402,8 @@ function lift() {
 function unlift() {
   const ps = pageState(sel.pageId);
   ps.hidden = null;
+  ps.swap = null;
+  sel.floats = null;
   ps.rev++;
   sel.rev = ps.rev;
   sel.lift = null;
@@ -1258,7 +1421,22 @@ function drawLifted(ctx) {
   ctx.translate(t.ax + t.dx, t.ay + t.dy);
   ctx.scale(t.s, t.s);
   ctx.translate(-t.ax, -t.ay);
-  drawStrokes(ctx, sel.strokes);
+  // 段の順に: 塗り → 線画 → 影(乗算) → 白 → 文字
+  const drawFloat = (L) => {
+    for (const x of sel.floats || []) {
+      if (x.L !== L) continue;
+      const [x0, y0, x1, y1] = x.f.box;
+      ctx.save();
+      if (L === 's') ctx.globalCompositeOperation = 'multiply';
+      ctx.drawImage(x.f.img, x0, y0, x1 - x0, y1 - y0);
+      ctx.restore();
+    }
+  };
+  drawFloat('u');
+  drawStrokes(ctx, sel.strokes.filter((st) => !st.x));
+  drawFloat('s');
+  drawFloat('h');
+  drawStrokes(ctx, sel.strokes.filter((st) => st.x));
   ctx.restore();
 }
 
@@ -1285,7 +1463,11 @@ function startSelTool(e) {
   if (settings.tool === 'move') {
     const st = topStrokeAt(selTargets(ps.strokes), hit.x, hit.y, SEL_PICK / cam.z);
     if (st) { setSel(hit.id, hit.top, [st]); selOp = { ...base, kind: 'move', w0: [wx, wy] }; }
-    else selOp = { ...base, kind: 'none' };
+    else {
+      selOp = { ...base, kind: 'none' };
+      const L = resolveTarget(settings.selTarget);
+      if (L && isRasterLayer(L)) toast(`${LAYERS[L].name}は範囲選択（投げ縄・四角）で囲んで動かす`);
+    }
     return true;
   }
   selOp = { ...base, kind: settings.selMode === 'rect' ? 'rect' : 'lasso', pageId: hit.id, top: hit.top, pts: [[hit.x, hit.y]] };
@@ -1357,53 +1539,94 @@ function finishLasso(o) {
   const poly = o.kind === 'rect' ? rectPoly(o.pts[0], o.pts[1] || o.pts[0]) : o.pts;
   if (poly.length < 3) return;
   const pb = polyBox(poly);
+  // 塗り・影・白: 囲んだ中の画素も選ぶ(前の版の線データは、ここで画像に焼き込む。線として拾わないように先に)
+  const rasters = selRasterLayers().filter((L) => rasterBase(o.pageId, L));
   const picked = selTargets(ps.strokes).filter((st) => fractionInPoly(st, poly, pb) >= 0.5);
   // 線が無くても、囲んだ範囲は選択として残す(塗りつぶしに使える)
-  setSel(o.pageId, o.top, picked, poly.map((q) => q.slice()));
+  setSel(o.pageId, o.top, picked, poly.map((q) => q.slice()), rasters);
 }
-/** 動かし終わった: 変形した新しい線に差し替えて1手の履歴にする */
+/** 動かし終わった: 変形した新しい線に差し替えて1手の履歴にする。
+ *  画素は、抜いた画像に、切り出した画素を変形して貼った新しい段にする */
 function commitLift() {
   const t = sel.lift;
   const ps = pageState(sel.pageId);
+  const floats = sel.floats || [];
   ps.hidden = null;
+  ps.swap = null;
+  sel.floats = null;
   sel.lift = null;
   endInteractionSoon();
   if (t.s === 1 && !t.dx && !t.dy) { ps.rev++; sel.rev = ps.rev; requestRender(); return; }
   if (sel.poly) sel.poly = sel.poly.map(([x, y]) => [t.ax + (x - t.ax) * t.s + t.dx, t.ay + (y - t.ay) * t.s + t.dy]);
-  if (!sel.strokes.length) { ps.rev++; sel.rev = ps.rev; sel.box = selBoxOf(sel); requestRender(); return; }
+  if (!sel.strokes.length && !floats.length) { ps.rev++; sel.rev = ps.rev; sel.box = selBoxOf(sel); requestRender(); return; }
   const map = new Map(sel.strokes.map((st) => [st, transformStroke(st, t.ax, t.ay, t.s, t.dx, t.dy)]));
+  const made = [];
+  for (const x of floats) {
+    pasteFloat(x.hole, x.f, t);
+    const obj = makeRaster(x.L, x.hole, PAGE_W, PAGE_H);
+    map.set(x.layer, obj);
+    made.push([obj, x.layer]);
+  }
   const before = ps.strokes;
   const after = before.map((st) => map.get(st) || st);
   setPageStrokes(sel.pageId, after);
+  for (const [obj, old] of made) { startEncode(obj); releaseRaster(old); }
   pushHistory([{ pageId: sel.pageId, before, after }]);
-  sel.strokes = [...map.values()];
+  sel.strokes = sel.strokes.map((st) => map.get(st));
   sel.box = selBoxOf(sel);
   sel.rev = ps.rev;
   requestRender();
 }
+/** 選んだ画素について、段ごとに新しい画像を作る。edit(cv, layer, src) で書き換える。戻り値 Map(古い段 → 新しい段) */
+function editSelPixels(edit) {
+  const map = new Map();
+  for (const L of sel.rasters || []) {
+    const layer = rasterBase(sel.pageId, L);
+    const src = layer && rasterSource(layer);
+    if (!src) continue;
+    const cv = copyLayer(layer, PAGE_W, PAGE_H);
+    edit(cv, layer, src);
+    map.set(layer, makeRaster(L, cv, PAGE_W, PAGE_H));
+  }
+  return map;
+}
+function settlePixels(map) {
+  for (const [old, obj] of map) { startEncode(obj); releaseRaster(old); }
+}
 function deleteSel() {
-  if (!sel || selOp || !sel.strokes.length) return;
+  if (!sel || selOp || (!sel.strokes.length && !selHasPixels())) return;
   const { pageId } = sel;
   const gone = new Set(sel.strokes);
-  const before = pageState(pageId).strokes, after = before.filter((st) => !gone.has(st));
+  // 画素: 囲んだ中を消した新しい段にする
+  const pix = editSelPixels((cv) => clearPoly(cv, sel.poly));
+  const before = pageState(pageId).strokes;
+  const after = before.filter((st) => !gone.has(st)).map((st) => pix.get(st) || st);
+  const n = before.length - after.length;
   sel = null;
-  if (after.length !== before.length && setPageStrokes(pageId, after)) {
+  if ((n || pix.size) && setPageStrokes(pageId, after)) {
+    settlePixels(pix);
     pushHistory([{ pageId, before, after }]);
-    toast(`${before.length - after.length}本の線を削除した`);
+    toast(n ? `${n}本の線${pix.size ? 'と、囲んだ中の塗り' : ''}を削除した` : '囲んだ中の塗りを削除した');
   }
   requestRender();
   requestLive();
 }
 /** 複製: 少しずらした位置に写しを作り、写しの方を選ぶ */
 function duplicateSel() {
-  if (!sel || selOp || !sel.strokes.length) return;
+  if (!sel || selOp || (!sel.strokes.length && !selHasPixels())) return;
   const { pageId, top } = sel;
   const off = 40;
   const copies = sel.strokes.map((st) => transformStroke(st, 0, 0, 1, off, off));
-  const before = pageState(pageId).strokes, after = addStrokes(before, copies);
+  // 画素: 囲んだ中を切り出して、ずらした所に貼る
+  const pix = editSelPixels((cv, layer, src) => {
+    const f = extractPoly(src, sel.poly);
+    if (f) pasteFloat(cv, f, { ax: 0, ay: 0, s: 1, dx: off, dy: off });
+  });
+  const before = pageState(pageId).strokes, after = addStrokes(before.map((st) => pix.get(st) || st), copies);
   if (!setPageStrokes(pageId, after)) return;
+  settlePixels(pix);
   pushHistory([{ pageId, before, after }]);
-  setSel(pageId, top, copies, sel.poly && sel.poly.map(([x, y]) => [x + off, y + off]));
+  setSel(pageId, top, copies, sel.poly && sel.poly.map(([x, y]) => [x + off, y + off]), sel.rasters);
   requestRender();
 }
 
@@ -1422,8 +1645,16 @@ function addToPage(pageId, news, bottom = false) {
 function fillSel() {
   if (!sel?.poly || selOp) return;
   const f = polygonFill(sel.poly, fillColor());
-  if (!f || !addToPage(sel.pageId, [toFillLayer(f)])) return;
-  sel.strokes = sel.strokes.concat([f]);
+  if (!f) return;
+  const L = settings.fill.layer;
+  if (isRasterLayer(L)) {
+    // 塗り・影・白: 段の画像に塗り込み、その段の画素を選択に加える(そのまま動かせる)
+    if (!commitRaster(sel.pageId, L, (g) => paintInto(g, f), polyBox(sel.poly))) return;
+    sel.rasters = [...new Set([...(sel.rasters || []), L])];
+  } else {
+    if (!addToPage(sel.pageId, [toFillLayer(f)])) return;
+    sel.strokes = sel.strokes.concat([f]);
+  }
   sel.box = selBoxOf(sel);
   sel.rev = pageState(sel.pageId).rev;
   requestLive();
@@ -1444,7 +1675,10 @@ async function doFill(wx, wy) {
   await ensureImages(strokes); // 画像の線も境目として使う
   if (ps.strokes !== strokes) return; // 待っている間に変わった
   const f = bucketFill(fillRefs(strokes), PAGE_W, PAGE_H, hit.x, hit.y, fillColor(), settings.fill.e);
-  if (f) addToPage(hit.id, [toFillLayer(f)]);
+  if (!f) return;
+  const L = settings.fill.layer;
+  if (isRasterLayer(L)) commitRaster(hit.id, L, (g) => paintInto(g, f), bbox(f)); // 塗り・影・白: 段の画像に塗り込む
+  else addToPage(hit.id, [toFillLayer(f)]);
 }
 /* 塗りつぶしのレイヤー:
    線画 … 線画レイヤーを見て、線画レイヤーに塗る(今までどおり)
@@ -1536,7 +1770,8 @@ function drawSelOverlay(ctx) {
       show = true;
       const has = sel.strokes.length > 0;
       $('selFill').hidden = !sel.poly;
-      $('selDup').disabled = $('selDel').disabled = $('selFront').disabled = $('selBack').disabled = !has;
+      $('selDup').disabled = $('selDel').disabled = !has && !selHasPixels();
+      $('selFront').disabled = $('selBack').disabled = !has;
       placeSelBar(x0, y0, x1, y1);
     }
   }
@@ -1849,6 +2084,7 @@ stage.addEventListener('pointerdown', (e) => {
 });
 function startTool(e) {
   if (wantsEraser(e)) { startErase(e); return true; }
+  if (isBlurTool()) { startErase(e, 'blur'); return true; }
   if (isSelTool()) return startSelTool(e);
   if (settings.tool === 'fill') return startFillTool(e);
   return startStroke(e);
@@ -1872,8 +2108,8 @@ stage.addEventListener('pointermove', (e) => {
     touchMove(e);
     return;
   }
-  // ホバー(ペンを浮かせている/マウス): 消しゴムの円を出す
-  if (isEraserTool() || (e.pointerType === 'pen' && wantsEraser(e))) {
+  // ホバー(ペンを浮かせている/マウス): 消しゴム・ぼかしの円を出す
+  if (isEraserTool() || isBlurTool() || (e.pointerType === 'pen' && wantsEraser(e))) {
     cursor = { x: e.clientX, y: e.clientY };
     requestLive();
   } else if (cursor) { cursor = null; requestLive(); }
@@ -1939,6 +2175,7 @@ window.addEventListener('keydown', (e) => {
   if ((e.key === 'Delete' || e.key === 'Backspace') && sel) { e.preventDefault(); deleteSel(); return; }
   if (e.key === 'Escape' && sel) { clearSel(); return; }
   if (k === 'e') selectTool('eraser');
+  else if (k === 'r') selectTool('blur');
   else if (k === 'v') selectTool('move');
   else if (k === 'l') selectTool('select');
   else if (k === 'g') selectTool('fill');
@@ -2027,6 +2264,10 @@ function renderDock() {
   if (!badge) { badge = document.createElement('span'); badge.className = 'mode-badge'; eb.appendChild(badge); }
   badge.textContent = settings.eraserMode === 'part' ? '部分' : '線ごと';
   setLayerChip(eb, settings.eraseTarget);
+  const blb = $('blurBtn');
+  blb.classList.toggle('active', isBlurTool());
+  blb.querySelector('.pen-w').textContent = settings.blur.size;
+  setLayerChip(blb, settings.blur.target);
   setLayerChip($('moveBtn'), settings.selTarget);
   setLayerChip($('selectBtn'), settings.selTarget);
   setLayerChip($('fillBtn'), settings.fill.layer);
@@ -2060,12 +2301,40 @@ function selectTool(t) {
   if (t !== 'select' && t !== 'move' && t !== 'fill') clearSel();
   saveSettings();
   renderDock();
-  if (!isEraserTool() && cursor) { cursor = null; requestLive(); }
+  if (!isEraserTool() && !isBlurTool() && cursor) { cursor = null; requestLive(); }
 }
 $('eraserBtn').addEventListener('click', () => {
   if (isEraserTool()) openEraserDialog();
   else selectTool('eraser');
 });
+$('blurBtn').addEventListener('click', () => {
+  if (isBlurTool()) openBlurDialog();
+  else selectTool('blur');
+});
+// ぼかしの印: 対象を 全部→塗り→影→白 の順に切り替える
+const BLUR_TARGETS = ['all', 'u', 's', 'h'];
+$('blurBtn').addEventListener('click', (e) => {
+  if (!e.target.closest('.layer-chip')) return;
+  e.stopImmediatePropagation();
+  const i = BLUR_TARGETS.indexOf(settings.blur.target);
+  settings.blur.target = BLUR_TARGETS[(i + 1) % BLUR_TARGETS.length];
+  saveSettings();
+  renderDock();
+  toast(`ぼかし: ${settings.blur.target === 'all' ? '塗り・影・白' : LAYERS[settings.blur.target].name}`);
+}, true);
+/* ---- ぼかしの設定 ---- */
+function openBlurDialog() {
+  $('blurSize').value = settings.blur.size;
+  $('blurSizeOut').textContent = settings.blur.size;
+  $('blurStr').value = settings.blur.str;
+  $('blurStrOut').textContent = settings.blur.str;
+  for (const r of document.querySelectorAll('input[name=blurTarget]')) r.checked = r.value === settings.blur.target;
+  $('blurDlg').showModal();
+}
+const setBlur = (patch) => { Object.assign(settings.blur, patch); saveSettings(); renderDock(); };
+$('blurSize').addEventListener('input', (e) => { const v = Number(e.target.value); $('blurSizeOut').textContent = v; setBlur({ size: v }); });
+$('blurStr').addEventListener('input', (e) => { const v = Number(e.target.value); $('blurStrOut').textContent = v; setBlur({ str: v }); });
+for (const r of document.querySelectorAll('input[name=blurTarget]')) r.addEventListener('change', () => setBlur({ target: r.value }));
 $('moveBtn').addEventListener('click', () => selectTool('move'));
 $('underPenBtn').addEventListener('click', () => {
   if (settings.tool === 'pen' + UNDER_PEN) openPenDialog(UNDER_PEN);
@@ -2906,7 +3175,7 @@ async function sendPages(target) {
   }
   const recs = [], thumbs = [], newIds = [];
   for (const id of ids) {
-    const strokes = await strokesOf(id);
+    const strokes = await persistStrokes(await strokesOf(id));
     const nid = uid('pg');
     newIds.push(nid);
     recs.push([nid, { strokes }]);
