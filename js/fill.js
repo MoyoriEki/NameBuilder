@@ -5,7 +5,7 @@
    - 範囲(マスク)の輪郭をたどってベクターの多角形にし、点を間引いて「塗り」として保存する
      (線と同じく、選択して移動・拡大縮小・undo・同期ができる)
    ============================================================ */
-import { drawStrokes, makeFill, fillPath } from './ink.js?v=29';
+import { drawStrokes, makeFill, fillPath } from './ink.js?v=30';
 
 const TOL = 24; // タップした色との差がこれ以内なら同じ色とみなす(0..255)
 
@@ -116,9 +116,11 @@ export function subtractCircles(fill, circles, W, H) {
   for (let i = 0; i < m.length; i++) m[i] = data[i * 4 + 3] >= 128 ? 1 : 0;
   const contours = traceMask(m, bw, bh, x0, y0);
   if (!contours.length) return null;
-  // 置いてあったレイヤー(塗り・文字)はそのまま
+  // 置いてあったレイヤー(塗り・影・白・文字)はそのまま
   const out = makeFill(fill.c, contours);
   if (fill.u) out.u = 1;
+  if (fill.s) out.s = 1;
+  if (fill.h) out.h = 1;
   if (fill.x) { out.x = 1; out.b = 0; }
   return out;
 }

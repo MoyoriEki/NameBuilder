@@ -19,7 +19,7 @@
 <!-- Dropbox連携の共通ライブラリ(無改造で利用)。読み込めなければローカルのみで動く -->
 <link rel="stylesheet" href="https://moyorieki.github.io/storage-bridge/storage-bridge.css">
 <script src="https://moyorieki.github.io/storage-bridge/storage-bridge.js"></script>
-<link rel="stylesheet" href="css/app.css?v=29">
+<link rel="stylesheet" href="css/app.css?v=30">
 <title>ネームビルダー</title>
 </head>
 <body>
@@ -74,6 +74,12 @@
     <button id="underPenBtn" class="tool" type="button" title="塗りペン (U)：いつも一番下に描かれる（線の下を塗る）。2回タップで設定">
       <span class="under-ico"></span><span class="pen-w"></span>
     </button>
+    <button id="shadowPenBtn" class="tool" type="button" title="影ペン (S)：線画の上に乗算で重なる（黒い線は黒いまま、紙や薄い所が暗くなる）。2回タップで設定">
+      <span class="shadow-ico">影</span><span class="pen-w"></span>
+    </button>
+    <button id="whitePenBtn" class="tool" type="button" title="白ペン (W)：線・影の上、文字の下に白を描く（吐息・白抜き・モザイク）。ベタ／エアブラシ／スプレー。2回タップで設定">
+      <span class="white-ico">白</span><span class="mode-badge"></span>
+    </button>
     <button id="textPenBtn" class="tool" type="button" title="文字ペン (T)：いつも一番上に描かれる・白いフチつき。2回タップで設定">
       <span class="text-ico">あ</span><span class="mode-badge"></span>
     </button>
@@ -108,11 +114,28 @@
 <!-- ============ ペン設定 ============ -->
 <dialog id="penDlg" class="pop">
   <h2 id="penDlgTitle">ペン</h2>
+  <div id="penWhiteBox" class="sub-box">
+    <div class="seg">
+      <label><input type="radio" name="whiteMode" value="flat"> ベタ</label>
+      <label><input type="radio" name="whiteMode" value="air"> エアブラシ</label>
+      <label><input type="radio" name="whiteMode" value="spray"> スプレー</label>
+    </div>
+    <p id="whiteModeNote" class="muted small"></p>
+  </div>
   <div class="swatches" id="penColors"></div>
-  <label class="row">色を指定 <input id="penColorInput" type="color"></label>
-  <label class="row col">太さ <span><output id="penWidthOut"></output> px</span>
+  <label class="row" id="penColorRow">色を指定 <input id="penColorInput" type="color"></label>
+  <p id="penShadowNote" class="muted small">乗算で重なるので、黒い線は黒いまま、紙や薄い所だけ暗くなる。白に近い色ほど薄い影。影どうしが重なると濃くなる</p>
+  <label class="row col"><span id="penWidthLabel">太さ</span> <span><output id="penWidthOut"></output> px</span>
     <input id="penWidth" type="range" min="1" max="120" step="1"></label>
-  <label class="row"><input id="penPressure" type="checkbox"> 筆圧で太さを変える</label>
+  <label class="row"><input id="penPressure" type="checkbox"> <span id="penPressureLabel">筆圧で太さを変える</span></label>
+  <label class="row col" id="penBlurRow">ぼかし <span class="muted small">ふちを柔らかくする幅。0でくっきり</span> <span><output id="penBlurOut"></output> px</span>
+    <input id="penBlur" type="range" min="0" max="80" step="1"></label>
+  <label class="row col" id="penAlphaRow">濃さ <span class="muted small">下がうっすら透ける</span> <span><output id="penAlphaOut"></output>%</span>
+    <input id="penAlpha" type="range" min="0.1" max="1" step="0.05"></label>
+  <label class="row col" id="penDotRow">粒の大きさ <span><output id="penDotOut"></output> px</span>
+    <input id="penDot" type="range" min="1" max="16" step="0.5"></label>
+  <label class="row col" id="penDensRow">粒の量 <span><output id="penDensOut"></output></span>
+    <input id="penDens" type="range" min="1" max="10" step="1"></label>
   <label class="row" id="penOpacityRow"><input id="penOpacity" type="checkbox"> 筆圧で濃さを変える</label>
   <label class="row col" id="penBorderRow">フチ取り（白） <span class="muted small">文字の周りの白いフチの太さ。0でフチなし</span> <span><output id="penBorderOut"></output> px</span>
     <input id="penBorder" type="range" min="0" max="40" step="1"></label>
@@ -145,36 +168,43 @@
     <label><input type="radio" name="eraseTarget" value="all"> 全部</label>
     <label><input type="radio" name="eraseTarget" value="n"> 線画</label>
     <label><input type="radio" name="eraseTarget" value="u"> 塗り</label>
+    <label><input type="radio" name="eraseTarget" value="s"> 影</label>
+    <label><input type="radio" name="eraseTarget" value="h"> 白</label>
     <label><input type="radio" name="eraseTarget" value="x"> 文字</label>
     <label><input type="radio" name="eraseTarget" value="auto"> 直前のペン <span id="eraseAutoNote" class="muted small"></span></label>
   </div>
-  <p class="muted small">線画＝ペン1〜3とバケツの塗り、文字＝文字ペン、塗り＝塗りペン。ボタン左上の印をタップしても切り替えられる（全部→線画→塗り→文字の順。灰「線」／橙「塗」／青「文」／「全」。点線で囲んだ印は直前のペンに合わせている）。消しゴムの円の色も対象のレイヤーの色になる。画像は消しゴムでは消えない</p>
+  <p class="muted small">線画＝ペン1〜3とバケツの塗り、塗り＝塗りペン、影＝影ペン、白＝白ペン、文字＝文字ペン（バケツで塗った塗りは塗る先のレイヤー）。ボタン左上の印をタップしても切り替えられる（全部→線画→塗り→影→白→文字の順。灰「線」／橙「塗」／紫「影」／水色「白」／青「文」／「全」。点線で囲んだ印は直前のペンに合わせている）。消しゴムの円の色も対象のレイヤーの色になる。画像は消しゴムでは消えない</p>
   <div class="actions"><button class="btn" type="button" data-close>閉じる</button></div>
 </dialog>
 
 <!-- ============ 塗りつぶしの設定 ============ -->
 <dialog id="fillDlg" class="pop">
   <h2>塗りつぶし</h2>
+  <p id="fillColorNote" class="muted small"></p>
   <div class="swatches" id="fillColors"></div>
-  <label class="row">色を指定 <input id="fillColorInput" type="color"></label>
+  <label class="row" id="fillColorRow">色を指定 <input id="fillColorInput" type="color"></label>
   <label class="row col">はみ出し <span class="muted small">線の下へ広げる幅。線のきわに白い隙間が残るときは大きく</span> <span><output id="fillExpandOut"></output> px</span>
     <input id="fillExpand" type="range" min="0" max="8" step="1"></label>
   <div class="row">塗る先</div>
   <div class="seg">
     <label><input type="radio" name="fillLayer" value="n"> 線画</label>
     <label><input type="radio" name="fillLayer" value="u"> 塗り</label>
+    <label><input type="radio" name="fillLayer" value="s"> 影</label>
+    <label><input type="radio" name="fillLayer" value="h"> 白</label>
     <label><input type="radio" name="fillLayer" value="x"> 文字</label>
   </div>
   <div id="fillRefBox" class="sub-box">
-    <div class="row small">塗りに塗るときに、境目として見るレイヤー</div>
+    <div class="row small">塗り・影・白に塗るときに、境目として見るレイヤー</div>
     <div class="seg">
       <label><input type="checkbox" id="fillRef_n"> 線画</label>
       <label><input type="checkbox" id="fillRef_u"> 塗り</label>
+      <label><input type="checkbox" id="fillRef_s"> 影</label>
+      <label><input type="checkbox" id="fillRef_h"> 白</label>
       <label><input type="checkbox" id="fillRef_x"> 文字</label>
     </div>
   </div>
   <p id="fillModeNote" class="small"></p>
-  <p class="muted small">線画 … 線画を見て、線画レイヤーに塗る。<br>塗り … 選んだレイヤー（標準は線画）を見て、塗りレイヤー（いちばん下）に塗る。線の下に色を置くとき用。<br>文字 … 文字ペンの線を見て、文字レイヤーに塗る。フキダシや描き文字の中を塗るとき用。中の文字は塗りに隠れない。<br>ボタン左上の印をタップしても 線画→塗り→文字 の順に切り替わる。投げ縄・四角で選んだ中をタップすると、線に関係なく選択範囲を、選んだ塗る先のレイヤーに塗る。</p>
+  <p class="muted small">線画 … 線画を見て、線画レイヤーに塗る。<br>塗り … 選んだレイヤー（標準は線画）を見て、塗りレイヤー（いちばん下）に塗る。線の下に色を置くとき用。<br>影 … 選んだレイヤーを見て、影レイヤーに塗る。線画の上に乗算で重なる。色は影ペンと同じ。<br>白 … 選んだレイヤーを見て、白レイヤーに白で塗る。線や影の上、文字の下。白抜き・モザイク用（四角で囲んで「塗る」が早い）。<br>文字 … 文字ペンの線を見て、文字レイヤーに塗る。フキダシや描き文字の中を塗るとき用。中の文字は塗りに隠れない。<br>ボタン左上の印をタップしても 線画→塗り→影→白→文字 の順に切り替わる。投げ縄・四角で選んだ中をタップすると、線に関係なく選択範囲を、選んだ塗る先のレイヤーに塗る。</p>
   <div class="actions"><button class="btn" type="button" data-close>閉じる</button></div>
 </dialog>
 
@@ -190,10 +220,12 @@
     <label><input type="radio" name="selTarget" value="all"> 全部</label>
     <label><input type="radio" name="selTarget" value="n"> 線画</label>
     <label><input type="radio" name="selTarget" value="u"> 塗り</label>
+    <label><input type="radio" name="selTarget" value="s"> 影</label>
+    <label><input type="radio" name="selTarget" value="h"> 白</label>
     <label><input type="radio" name="selTarget" value="x"> 文字</label>
     <label><input type="radio" name="selTarget" value="auto"> 直前のペン <span id="selAutoNote" class="muted small"></span></label>
   </div>
-  <p class="muted small">ボタン左上の印をタップしても切り替えられる（全部→線画→塗り→文字の順）。コマとセリフをまとめて動かすときは「全部」</p>
+  <p class="muted small">ボタン左上の印をタップしても切り替えられる（全部→線画→塗り→影→白→文字の順）。コマとセリフをまとめて動かすときは「全部」</p>
   <p class="muted small">囲んだ中に半分以上入っている線を選ぶ。囲まずにタップすると、その線を1本選ぶ。<br>選んだ後は、枠の中をドラッグで移動・右下の丸で拡大縮小・枠の外をタップで解除。</p>
   <div class="actions"><button class="btn" type="button" data-close>閉じる</button></div>
 </dialog>
@@ -380,6 +412,6 @@
 </script>
 <!-- 版番号(?v=)は css/js を変えるたびに index.html と js/app.js の両方で上げる。
      新旧のファイルが混ざって読み込みに失敗するのを防ぐため -->
-<script type="module" src="js/app.js?v=29"></script>
+<script type="module" src="js/app.js?v=30"></script>
 </body>
 </html>

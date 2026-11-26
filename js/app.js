@@ -6,13 +6,13 @@
    - 描画中の線だけは重ねキャンバス(#live)に描き、
      ペンを離したらページのキャッシュへ焼き込む
    ============================================================ */
-import * as db from './db.js?v=29';
+import * as db from './db.js?v=30';
 import { drawStroke, drawStrokes, addStrokes, drawLiveStroke, isOpacityStroke, opacityAt, bbox, bboxHit, hitStroke, eraseSplit, sweep,
   fractionInPoly, topStrokeAt, unionBox, transformStroke, pointInPoly, strokePath,
-  ensureImages, setImageReady, makeImage } from './ink.js?v=29';
-import { bucketFill, polygonFill, subtractCircles } from './fill.js?v=29';
-import { pngWithDpi, makeZip } from './zip.js?v=29';
-import * as cloud from './cloud.js?v=29';
+  ensureImages, setImageReady, makeImage, sprayer, seededRandom, primeDots } from './ink.js?v=30';
+import { bucketFill, polygonFill, subtractCircles } from './fill.js?v=30';
+import { pngWithDpi, makeZip } from './zip.js?v=30';
+import * as cloud from './cloud.js?v=30';
 
 const PAGE_W = 2508, PAGE_H = 3541, DPI = 350;
 const GAP = 140;                 // ページ間の隙間(page-px)
@@ -40,11 +40,16 @@ const DEFAULTS = {
   tool: 'pen0',
   textPen: { c: '#1f2328', w: 6, pr: true, b: 8 }, // 文字ペン(オートレイヤー)。b = フチの太さ(page-px)
   underPen: { c: '#c4c9ce', w: 40, pr: false },    // 塗りペン(オートレイヤー: いつも一番下)
-  // 塗りつぶし。e = はみ出し(線の下へ広げる px)、layer = 塗る先(n=線画 / u=塗り / x=文字)、
-  // ref = 塗り(u)に塗るときに境目として見るレイヤー(線画・文字は、それぞれ自分のレイヤーだけを見る)
-  fill: { c: '#1f2328', e: 2, layer: 'n', ref: { n: true, u: false, x: false } },
+  shadowPen: { c: '#b4b9be', w: 60, pr: false, bl: 0 }, // 影ペン(オートレイヤー: 線画の上に乗算で重なる)。bl = ぼかし
+  // 白ペン(オートレイヤー: 線画・影の上、文字の下)。m = 種類(flat=ベタ / air=エアブラシ / spray=スプレー)、
+  // a = 濃さ(エアブラシ・スプレー)、bl = ぼかし(エアブラシ)、ds = 粒の大きさ(半径 px)・dn = 粒の量(スプレー)
+  whitePen: { c: '#ffffff', w: 40, pr: true, m: 'air', a: 0.8, bl: 10, ds: 4, dn: 5 },
+  // 塗りつぶし。e = はみ出し(線の下へ広げる px)、layer = 塗る先(n=線画 / u=塗り / s=影 / h=白 / x=文字)、
+  // ref = 塗り・影・白に塗るときに境目として見るレイヤー(線画・文字は、それぞれ自分のレイヤーだけを見る)。
+  // 色は 線画・塗り・文字 は c、影は影ペンの色、白は白
+  fill: { c: '#1f2328', e: 2, layer: 'n', ref: { n: true, u: false, s: false, h: false, x: false } },
   eraserMode: 'part',
-  eraseTarget: 'all', // 消しゴムが消すレイヤー: all=全部 / n=線画 / x=文字 / u=塗り / auto=直前に使ったペンのレイヤー
+  eraseTarget: 'all', // 消しゴムが消すレイヤー: all=全部 / n=線画 / u=塗り / s=影 / h=白 / x=文字 / auto=直前に使ったペンのレイヤー
   selTarget: 'all',   // 範囲選択・移動で選ぶレイヤー(同上)
   eraserSize: 40,
   selMode: 'lasso',   // 選択ツール: lasso=投げ縄 / rect=四角
@@ -74,16 +79,21 @@ const settings = (() => {
   if (!Array.isArray(s.pens) || s.pens.length !== 3) s.pens = structuredClone(DEFAULTS.pens);
   s.textPen = { ...DEFAULTS.textPen, ...s.textPen };
   s.underPen = { ...DEFAULTS.underPen, ...s.underPen };
+  s.shadowPen = { ...DEFAULTS.shadowPen, ...s.shadowPen };
+  s.whitePen = { ...DEFAULTS.whitePen, ...s.whitePen, c: '#ffffff' };
+  if (!['flat', 'air', 'spray'].includes(s.whitePen.m)) s.whitePen.m = 'air';
   // 直前に使ったペン(消しゴム・選択の対象レイヤーを決める)
-  if (!/^pen[0-4]$/.test(s.lastPen || '')) s.lastPen = /^pen[0-4]$/.test(s.tool) ? s.tool : 'pen0';
+  if (!/^pen[0-6]$/.test(s.lastPen || '')) s.lastPen = /^pen[0-6]$/.test(s.tool) ? s.tool : 'pen0';
   s.fill = { ...DEFAULTS.fill, ...s.fill };
   s.fill.ref = { ...DEFAULTS.fill.ref, ...s.fill.ref };
-  if (!['n', 'u', 'x'].includes(s.fill.layer)) s.fill.layer = 'n';
+  if (!['n', 'u', 's', 'h', 'x'].includes(s.fill.layer)) s.fill.layer = 'n';
   return s;
 })();
 const saveSettings = () => localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
 
 const COLORS = ['#1f2328', '#5b6168', '#9aa0a6', '#3b78d8', '#6fb3ec', '#d64545', '#2f9e5b', '#e08a1e', '#9b59b6', '#ffffff'];
+// 影の色(乗算で重ねるので、白に近いほど薄い影になる)
+const SHADOW_COLORS = ['#e2e4e7', '#ccd0d4', '#b4b9be', '#9ca2a8', '#848a91', '#6b7178', '#c4c8e4', '#c3d6e8', '#e6d2c6', '#d9c6e0'];
 
 /* ---------------- 要素 ---------------- */
 const stage = $('stage');
@@ -429,16 +439,22 @@ function buildCache(id, ps, scale) {
   return c;
 }
 
-/** キャッシュの一部(b: page座標の矩形)だけ描き直す。消しゴム用 */
+/** キャッシュの一部(b: page座標の矩形)だけ描き直す。消しゴム用。
+ *  切り抜きはキャッシュの画素の境目に揃える。端の画素が半端に残ると、そこに乗算の影が
+ *  二重に掛かって濃い筋になる(普通の線でも縁が少し濃くなる) */
 function redrawRegion(c, strokes, b) {
-  const ctx = c.ctx;
-  const x0 = b[0] - 2, y0 = b[1] - 2, x1 = b[2] + 2, y1 = b[3] + 2;
+  const ctx = c.ctx, k = c.scale;
+  const px0 = Math.max(0, Math.floor((b[0] - 2) * k)), py0 = Math.max(0, Math.floor((b[1] - 2) * k));
+  const px1 = Math.min(c.canvas.width, Math.ceil((b[2] + 2) * k)), py1 = Math.min(c.canvas.height, Math.ceil((b[3] + 2) * k));
+  if (px1 <= px0 || py1 <= py0) return;
   ctx.save();
-  ctx.setTransform(c.scale, 0, 0, c.scale, 0, 0);
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
   ctx.beginPath();
-  ctx.rect(x0, y0, x1 - x0, y1 - y0);
+  ctx.rect(px0, py0, px1 - px0, py1 - py0);
   ctx.clip();
-  ctx.clearRect(x0, y0, x1 - x0, y1 - y0);
+  ctx.clearRect(px0, py0, px1 - px0, py1 - py0);
+  ctx.setTransform(k, 0, 0, k, 0, 0);
+  const x0 = px0 / k, y0 = py0 / k, x1 = px1 / k, y1 = py1 / k;
   drawStrokes(ctx, strokes.filter((st) => bboxHit(bbox(st), x0, y0, x1, y1)));
   applyCuts(ctx, c.id);
   ctx.restore();
@@ -625,11 +641,15 @@ function drawLive() {
     tctx.rect(0, 0, PAGE_W, PAGE_H);
     tctx.clip();
     const pts = drawing.pred.length ? drawing.pts.concat(drawing.pred) : drawing.pts;
-    // 文字ペン: 描いている線のフチが、もう書いてある文字を隠さないように中身を描き直す
-    const under = drawing.st.x ? () => {
-      for (const st of pageState(drawing.pageId).strokes || []) if (st.x) drawStroke(tctx, st);
-    } : null;
-    drawLiveStroke(tctx, drawing.st, pts, false, under);
+    if (drawing.st.s) drawShadowLive(tctx, drawing, pts);
+    else if (drawing.st.h) drawWhiteLive(tctx, drawing, pts);
+    else {
+      // 文字ペン: 描いている線のフチが、もう書いてある文字を隠さないように中身を描き直す
+      const under = drawing.st.x ? () => {
+        for (const st of pageState(drawing.pageId).strokes || []) if (st.x) drawStroke(tctx, st);
+      } : null;
+      drawLiveStroke(tctx, drawing.st, pts, false, under);
+    }
     // 塗りペン: 描いている線の上に、その辺りのほかの線を描き直す(離す前から線画の下に見える)
     if (drawing.st.u) {
       let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
@@ -656,6 +676,34 @@ function drawLive() {
     ctx.strokeStyle = L.ring;
     ctx.stroke();
   }
+}
+
+/** 影(描画中): 重ねキャンバスは下と普通に重なるだけなので、影をそのまま載せると線を隠してしまう。
+ *  描いている線の範囲だけ「紙＋全部のレイヤー(描きかけの影を差し込んだもの)」を描き直して載せる。
+ *  離したときとまったく同じ見た目になる。ctx はページ座標 */
+function drawShadowLive(ctx, d, pts) {
+  const st = liveStroke(d, pts);
+  if (!st.p.length) return;
+  const b = bbox(st);
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(b[0], b[1], b[2] - b[0], b[3] - b[1]);
+  ctx.clip();
+  ctx.fillStyle = '#fff';
+  ctx.fillRect(b[0], b[1], b[2] - b[0], b[3] - b[1]);
+  const near = (pageState(d.pageId).strokes || []).filter((q) => bboxHit(bbox(q), b[0], b[1], b[2], b[3]));
+  drawStrokes(ctx, addStrokes(near, [st]));
+  ctx.restore();
+}
+/** 白(描画中): 白は文字の下なので、白を載せてから、その辺りの文字を描き直す(塗りペンと同じやり方) */
+function drawWhiteLive(ctx, d, pts) {
+  const st = liveStroke(d, pts);
+  if (!st.p.length) return;
+  if (d.spray) primeDots(st, d.spray.path); // 粒の形は出すたびに足してあるので、毎回作り直さない
+  drawStroke(ctx, st);
+  const b = bbox(st);
+  const over = (pageState(d.pageId).strokes || []).filter((q) => q.x && bboxHit(bbox(q), b[0], b[1], b[2], b[3]));
+  if (over.length) drawStrokes(ctx, over);
 }
 
 /** 濃さが変わる線(描画中)は、重ねキャンバスを使わず画面(view)に直接、増えた区間だけ描き足す。
@@ -815,21 +863,23 @@ const isEraserTool = () => settings.tool === 'eraser';
 const isSelTool = () => settings.tool === 'select' || settings.tool === 'move';
 
 /* ---- レイヤーごとの消しゴム・選択 ----
-   線はどのペンで描いたかで3つのレイヤーに分かれる: 塗りペン(u) / ふつう(線・塗り・画像)(n) / 文字ペン(x)。
-   消しゴムと範囲選択・移動は、相手にするレイヤーを選べる(全部/線画/文字/塗り/直前に使ったペンのレイヤー)。
+   線はどのペンで描いたかで5つのレイヤーに分かれる: 塗りペン(u) / 影ペン(s) / ふつう(線・塗り・画像)(n) / 白ペン(h) / 文字ペン(x)。
+   消しゴムと範囲選択・移動は、相手にするレイヤーを選べる(全部/線画/塗り/影/白/文字/直前に使ったペンのレイヤー)。
    ボタン左上の印をタップで切り替え、2回タップの設定でも選べる */
 const LAYERS = {
   n: { label: '線', name: '線画', ring: 'rgba(40,50,60,0.85)', chip: '#3d444b' },
   x: { label: '文', name: '文字', ring: '#3b78d8', chip: '#3b78d8' },
   u: { label: '塗', name: '塗り', ring: '#c27c0e', chip: '#c27c0e' },
+  s: { label: '影', name: '影', ring: '#7a5cc0', chip: '#7a5cc0' },
+  h: { label: '白', name: '白', ring: '#1d9bb5', chip: '#1d9bb5' },
   all: { label: '全', name: '全部', ring: 'rgba(40,50,60,0.85)', chip: '#7a8288' },
 };
-const TARGETS = ['all', 'n', 'u', 'x']; // 印をタップしたときの切り替え順(直前のペンは設定ダイアログからだけ選べる)
-const layerOf = (st) => (st.u ? 'u' : st.x ? 'x' : 'n');
+const TARGETS = ['all', 'n', 'u', 's', 'h', 'x']; // 印をタップしたときの切り替え順(直前のペンは設定ダイアログからだけ選べる)
+const layerOf = (st) => (st.u ? 'u' : st.s ? 's' : st.h ? 'h' : st.x ? 'x' : 'n');
 /** 直前に使ったペンのレイヤー */
 const penLayer = () => {
   const i = Number(String(settings.lastPen).replace('pen', '')) || 0;
-  return i === 3 ? 'x' : i === 4 ? 'u' : 'n';
+  return i === 3 ? 'x' : i === 4 ? 'u' : i === 5 ? 's' : i === 6 ? 'h' : 'n';
 };
 /** 設定値 → 相手にするレイヤー(null = 全部) */
 const resolveTarget = (t) => (t === 'auto' ? penLayer() : LAYERS[t] && t !== 'all' ? t : null);
@@ -842,9 +892,13 @@ function selTargets(strokes) {
 }
 const targetName = (t) => (t === 'auto' ? `直前のペン（今は${LAYERS[penLayer()].name}）` : LAYERS[t]?.name || '全部');
 const penIndex = () => Number(settings.tool.replace('pen', '')) || 0;
-const TEXT_PEN = 3;  // 文字ペンはペン番号3として扱う(tool = 'pen3')
-const UNDER_PEN = 4; // 塗りペンはペン番号4(tool = 'pen4')
-const penOf = (i) => (i === TEXT_PEN ? settings.textPen : i === UNDER_PEN ? settings.underPen : settings.pens[i]);
+const TEXT_PEN = 3;   // 文字ペンはペン番号3として扱う(tool = 'pen3')
+const UNDER_PEN = 4;  // 塗りペンはペン番号4(tool = 'pen4')
+const SHADOW_PEN = 5; // 影ペンはペン番号5(tool = 'pen5')
+const WHITE_PEN = 6;  // 白ペンはペン番号6(tool = 'pen6')
+const penOf = (i) => (i === TEXT_PEN ? settings.textPen : i === UNDER_PEN ? settings.underPen
+  : i === SHADOW_PEN ? settings.shadowPen : i === WHITE_PEN ? settings.whitePen : settings.pens[i]);
+const WHITE_MODE = { flat: 'ベタ', air: 'エア', spray: '粒' };
 
 function toWorld(e) {
   return [cam.x + e.clientX / cam.z, cam.y + e.clientY / cam.z];
@@ -875,6 +929,25 @@ function penStroke(pen) {
   const st = { c: pen.c, w: pen.w, t: pen.pr ? PEN_THINNING : 0 };
   if (pen === settings.textPen) { st.x = 1; st.b = pen.b; return st; }
   if (pen === settings.underPen) { st.u = 1; return st; }
+  if (pen === settings.shadowPen) {
+    // 影: 乗算で重ねる。筆圧で濃さは付けない(段階ごとの部品の継ぎ目が乗算で濃くなるため)
+    st.s = 1;
+    if (pen.bl > 0) st.bl = pen.bl;
+    return st;
+  }
+  if (pen === settings.whitePen) {
+    st.h = 1;
+    st.c = '#ffffff';
+    if (pen.m === 'air') {
+      if (pen.bl > 0) st.bl = pen.bl;
+      if (pen.a < 1) st.a = pen.a;
+    } else if (pen.m === 'spray') {
+      st.k = 'd'; // 粒の並び(点は描いたときに sprayer で作る)
+      st.t = 0;
+      if (pen.a < 1) st.a = pen.a;
+    }
+    return st;
+  }
   if (pen.op && !isWhite(pen.c)) {
     st.o = pen.omin ?? OPACITY_DEFAULTS.omin;
     st.of = pen.ofull ?? OPACITY_DEFAULTS.ofull;
@@ -890,17 +963,19 @@ function startStroke(e) {
   if (!ps.strokes) { ensureLoaded(hit.id); return false; }
   const pen = penOf(penIndex());
   clearSel();
+  const st = penStroke(pen);
   drawing = {
     id: e.pointerId,
     pageId: hit.id,
     top: hit.top,
-    st: penStroke(pen),
+    st,
     pts: [],
     pred: [],
     sm: null,
     minD: 0.6 / cam.z,
     cx: e.clientX,
     cy: e.clientY,
+    spray: st.k === 'd' ? sprayer(pen) : null, // スプレー: 粒を出す係(粒は描いたときに決めて保存する)
   };
   addPoint(wx, wy - hit.top, pressureOf(e));
   requestLive();
@@ -914,6 +989,7 @@ function smoothStep(sm, x, y, p) {
 function addPoint(x, y, p) {
   const d = drawing;
   d.sm = smoothStep(d.sm, x, y, p);
+  if (d.spray) d.spray.add(d.sm[0], d.sm[1], d.sm[2]);
   const last = d.pts[d.pts.length - 1];
   if (!last || Math.hypot(d.sm[0] - last[0], d.sm[1] - last[1]) >= d.minD) d.pts.push(d.sm.slice());
   else if (d.sm[2] > last[2]) last[2] = d.sm[2];
@@ -939,7 +1015,7 @@ function moveStroke(e) {
 function endStroke(e) {
   const d = drawing;
   drawing = null;
-  if (e && e.type === 'pointerup') {
+  if (e && e.type === 'pointerup' && !d.spray) {
     // 手ブレ補正の遅れ分を詰めるため、最後に実座標を1点足す(筆圧は直前の値)
     const [wx, wy] = toWorld(e);
     const last = d.pts[d.pts.length - 1];
@@ -948,9 +1024,8 @@ function endStroke(e) {
   }
   requestLive();
   if (!d.pts.length) return;
-  const flat = new Float32Array(d.pts.length * 3);
-  d.pts.forEach((q, i) => { flat[i * 3] = q[0]; flat[i * 3 + 1] = q[1]; flat[i * 3 + 2] = q[2]; });
-  const st = { ...d.st, p: flat };
+  const st = liveStroke(d, d.pts);
+  if (!st.p.length) return;
   const ps = pageState(d.pageId);
   if (!ps.strokes) return; // 念のため(描いている間は手放さない)
   const before = ps.strokes;
@@ -972,6 +1047,13 @@ function endStroke(e) {
   pushHistory([{ pageId: d.pageId, before, after }]);
   markDirty(d.pageId);
   requestRender();
+}
+/** 描いている線をストロークの形にする(描画中の表示と、離したときの保存に使う)。スプレーは粒の並び */
+function liveStroke(d, pts) {
+  if (d.spray) return { ...d.st, p: new Float32Array(d.spray.dots) };
+  const p = new Float32Array(pts.length * 3);
+  pts.forEach((q, i) => { p[i * 3] = q[0]; p[i * 3 + 1] = q[1]; p[i * 3 + 2] = q[2]; });
+  return { ...d.st, p };
 }
 function cancelStroke() {
   drawing = null;
@@ -1339,7 +1421,7 @@ function addToPage(pageId, news, bottom = false) {
 /** 選択範囲を塗る。塗りは選択に加えるので、そのまま動かせる */
 function fillSel() {
   if (!sel?.poly || selOp) return;
-  const f = polygonFill(sel.poly, settings.fill.c);
+  const f = polygonFill(sel.poly, fillColor());
   if (!f || !addToPage(sel.pageId, [toFillLayer(f)])) return;
   sel.strokes = sel.strokes.concat([f]);
   sel.box = selBoxOf(sel);
@@ -1361,26 +1443,34 @@ async function doFill(wx, wy) {
   const strokes = ps.strokes;
   await ensureImages(strokes); // 画像の線も境目として使う
   if (ps.strokes !== strokes) return; // 待っている間に変わった
-  const f = bucketFill(fillRefs(strokes), PAGE_W, PAGE_H, hit.x, hit.y, settings.fill.c, settings.fill.e);
+  const f = bucketFill(fillRefs(strokes), PAGE_W, PAGE_H, hit.x, hit.y, fillColor(), settings.fill.e);
   if (f) addToPage(hit.id, [toFillLayer(f)]);
 }
 /* 塗りつぶしのレイヤー:
    線画 … 線画レイヤーを見て、線画レイヤーに塗る(今までどおり)
    塗り … 設定で選んだレイヤー(標準は線画)を見て、塗りレイヤー(いちばん下)に塗る。線の下に色を置く用
+   影   … 設定で選んだレイヤーを見て、影レイヤーに塗る(乗算で重なる)。色は影ペンの色
+   白   … 設定で選んだレイヤーを見て、白レイヤーに塗る(線・影の上、文字の下)。白抜き・モザイク用。色は白
    文字 … 文字レイヤーを見て、文字レイヤーに塗る。文字ペンで描いたフキダシ・描き文字の中を塗る用。
           文字レイヤーの塗りは文字の線より下に描くので、中の文字は隠れない */
-const FILL_LAYERS = ['n', 'u', 'x'];
+const FILL_LAYERS = ['n', 'u', 's', 'h', 'x'];
+const fillUsesRef = (L) => L === 'u' || L === 's' || L === 'h';
 function fillRefs(strokes) {
   const L = settings.fill.layer;
-  if (L !== 'u') return strokes.filter((st) => layerOf(st) === L);
+  if (!fillUsesRef(L)) return strokes.filter((st) => layerOf(st) === L);
   const ref = settings.fill.ref;
   return strokes.filter((st) => ref[layerOf(st)]);
 }
 function toFillLayer(f) {
-  if (settings.fill.layer === 'u') f.u = 1;
-  if (settings.fill.layer === 'x') { f.x = 1; f.b = 0; }
+  const L = settings.fill.layer;
+  if (L === 'u') f.u = 1;
+  if (L === 's') f.s = 1;
+  if (L === 'h') f.h = 1;
+  if (L === 'x') { f.x = 1; f.b = 0; }
   return f;
 }
+/** 塗りつぶしの色: 影に塗るときは影ペンの色、白に塗るときは白(塗る先を変えるたびに色を選び直さなくていいように) */
+const fillColor = () => (settings.fill.layer === 's' ? settings.shadowPen.c : settings.fill.layer === 'h' ? '#ffffff' : settings.fill.c);
 /** 投げ縄の線・選択枠・拡大縮小ハンドル・操作ボタン(drawLive から。ctx は重ねキャンバス) */
 function drawSelOverlay(ctx) {
   const o = selOp;
@@ -1854,6 +1944,8 @@ window.addEventListener('keydown', (e) => {
   else if (k === 'g') selectTool('fill');
   else if (k === 't') selectTool('pen' + TEXT_PEN);
   else if (k === 'u') selectTool('pen' + UNDER_PEN);
+  else if (k === 's') selectTool('pen' + SHADOW_PEN);
+  else if (k === 'w') selectTool('pen' + WHITE_PEN);
   else if (k === '1' || k === '2' || k === '3') selectTool('pen' + (Number(k) - 1));
   else if (k === 'b' || k === 'p') selectTool(settings.lastPen);
   else if (e.key === 'PageDown') goNext();
@@ -1891,7 +1983,7 @@ for (const [id, key, what] of [['eraserBtn', 'eraseTarget', '消しゴム'], ['m
     cycleTarget(key, what);
   }, true);
 }
-// 塗りつぶしの印: 塗る先を 線画→塗り→文字 の順に切り替える
+// 塗りつぶしの印: 塗る先を 線画→塗り→影→白→文字 の順に切り替える
 $('fillBtn').addEventListener('click', (e) => {
   if (!e.target.closest('.layer-chip')) return;
   e.stopImmediatePropagation();
@@ -1904,7 +1996,7 @@ function fillModeName() {
   if (L === 'n') return '線画に塗る';
   if (L === 'x') return '文字に塗る（文字を見る）';
   const refs = FILL_LAYERS.filter((k) => settings.fill.ref[k]).map((k) => LAYERS[k].name);
-  return `塗りに塗る（${refs.join('・') || '何も'}を見る）`;
+  return `${LAYERS[L].name}に塗る（${refs.join('・') || '何も'}を見る）`;
 }
 function renderDock() {
   const box = $('penSlots');
@@ -1952,7 +2044,14 @@ function renderDock() {
   ub.querySelector('.pen-w').textContent = settings.underPen.w;
   const fb = $('fillBtn');
   fb.classList.toggle('active', settings.tool === 'fill');
-  fb.querySelector('.fill-dot').style.background = settings.fill.c;
+  fb.querySelector('.fill-dot').style.background = fillColor();
+  const shb = $('shadowPenBtn');
+  shb.classList.toggle('active', settings.tool === 'pen' + SHADOW_PEN);
+  shb.querySelector('.shadow-ico').style.background = settings.shadowPen.c;
+  shb.querySelector('.pen-w').textContent = settings.shadowPen.w;
+  const whb = $('whitePenBtn');
+  whb.classList.toggle('active', settings.tool === 'pen' + WHITE_PEN);
+  whb.querySelector('.mode-badge').textContent = WHITE_MODE[settings.whitePen.m];
   $('dock').classList.toggle('right', settings.dockSide === 'right');
 }
 function selectTool(t) {
@@ -1976,6 +2075,14 @@ $('textPenBtn').addEventListener('click', () => {
   if (settings.tool === 'pen' + TEXT_PEN) openPenDialog(TEXT_PEN);
   else selectTool('pen' + TEXT_PEN);
 });
+$('shadowPenBtn').addEventListener('click', () => {
+  if (settings.tool === 'pen' + SHADOW_PEN) openPenDialog(SHADOW_PEN);
+  else selectTool('pen' + SHADOW_PEN);
+});
+$('whitePenBtn').addEventListener('click', () => {
+  if (settings.tool === 'pen' + WHITE_PEN) openPenDialog(WHITE_PEN);
+  else selectTool('pen' + WHITE_PEN);
+});
 $('fillBtn').addEventListener('click', () => {
   if (settings.tool === 'fill') openFillDialog();
   else selectTool('fill');
@@ -1996,16 +2103,31 @@ let editingPen = 0;
 function openPenDialog(i) {
   editingPen = i;
   const p = penOf(i);
-  const text = i === TEXT_PEN, under = i === UNDER_PEN;
-  $('penDlgTitle').textContent = text ? '文字ペン（いつも一番上に描く）' : under ? '塗りペン（いつも一番下に描く）' : 'ペン';
-  $('penOpacityRow').hidden = text || under;
+  const text = i === TEXT_PEN, under = i === UNDER_PEN, shadow = i === SHADOW_PEN, white = i === WHITE_PEN;
+  $('penDlgTitle').textContent = text ? '文字ペン（いつも一番上に描く）' : under ? '塗りペン（いつも一番下に描く）'
+    : shadow ? '影ペン（線画の上に乗算で重なる）' : white ? '白ペン（線・影の上、文字の下に描く）' : 'ペン';
+  $('penOpacityRow').hidden = text || under || shadow || white;
   $('penBorderRow').hidden = !text;
-  $('penWidth').max = under ? 300 : 120;
+  $('penWidth').max = under || shadow || white ? 300 : 120;
   $('penBorder').value = settings.textPen.b;
   $('penBorderOut').textContent = settings.textPen.b;
+  // 白ペンは色を選ばない
+  $('penColors').hidden = $('penColorRow').hidden = white;
+  $('penShadowNote').hidden = !shadow;
+  $('penWhiteBox').hidden = !white;
+  if (white) for (const r of document.querySelectorAll('input[name=whiteMode]')) r.checked = r.value === p.m;
+  $('penBlur').value = p.bl || 0;
+  $('penBlurOut').textContent = p.bl || 0;
+  $('penAlpha').value = p.a ?? 1;
+  $('penAlphaOut').textContent = Math.round((p.a ?? 1) * 100);
+  $('penDot').value = p.ds ?? 3;
+  $('penDotOut').textContent = p.ds ?? 3;
+  $('penDens').value = p.dn ?? 4;
+  $('penDensOut').textContent = p.dn ?? 4;
+  syncPenRows();
   const sw = $('penColors');
   sw.innerHTML = '';
-  for (const col of COLORS) {
+  for (const col of shadow ? SHADOW_COLORS : COLORS) {
     const b = document.createElement('button');
     b.type = 'button';
     b.className = 'swatch' + (col.toLowerCase() === p.c.toLowerCase() ? ' active' : '');
@@ -2025,6 +2147,43 @@ function openPenDialog(i) {
   sizePenPreview();
   drawPenPreview();
 }
+/** 影ペン・白ペンの種類で、出す設定を切り替える */
+function syncPenRows() {
+  const p = penOf(editingPen);
+  const shadow = editingPen === SHADOW_PEN, white = editingPen === WHITE_PEN;
+  const m = white ? p.m : '';
+  $('penBlurRow').hidden = !(shadow || m === 'air');
+  $('penAlphaRow').hidden = !(m === 'air' || m === 'spray');
+  $('penDotRow').hidden = $('penDensRow').hidden = m !== 'spray';
+  $('penPressureLabel').textContent = m === 'spray' ? '筆圧で粒の量を変える' : '筆圧で太さを変える';
+  $('penWidthLabel').textContent = m === 'spray' ? 'スプレーの幅' : '太さ';
+  $('whiteModeNote').textContent = m === 'flat' ? 'くっきりした不透明な白。白抜き・修正・モザイクの下地に'
+    : m === 'air' ? 'ふちがぼけた白（濃さで半透明にもできる）。吐息・もやに'
+    : m === 'spray' ? '細かい粒をまく。吐息の粒・キラキラに。部分消しは円に入った粒だけ消える' : '';
+}
+for (const r of document.querySelectorAll('input[name=whiteMode]')) {
+  r.addEventListener('change', () => { updatePen({ m: r.value }); syncPenRows(); });
+}
+$('penBlur').addEventListener('input', (e) => {
+  const v = Number(e.target.value);
+  $('penBlurOut').textContent = v;
+  updatePen({ bl: v });
+});
+$('penAlpha').addEventListener('input', (e) => {
+  const v = Number(e.target.value);
+  $('penAlphaOut').textContent = Math.round(v * 100);
+  updatePen({ a: v });
+});
+$('penDot').addEventListener('input', (e) => {
+  const v = Number(e.target.value);
+  $('penDotOut').textContent = v;
+  updatePen({ ds: v });
+});
+$('penDens').addEventListener('input', (e) => {
+  const v = Number(e.target.value);
+  $('penDensOut').textContent = v;
+  updatePen({ dn: v });
+});
 function syncOpacityInputs() {
   const p = penOf(editingPen);
   const v = { ...OPACITY_DEFAULTS, ...Object.fromEntries(Object.entries({ omin: p.omin, ofull: p.ofull, ogamma: p.ogamma }).filter(([, x]) => x !== undefined)) };
@@ -2076,7 +2235,7 @@ $('penOpacityReset').addEventListener('click', () => {
 });
 function syncOpacityRow() {
   const p = penOf(editingPen);
-  const special = editingPen === TEXT_PEN || editingPen === UNDER_PEN;
+  const special = editingPen >= TEXT_PEN;
   $('penOpacityBox').hidden = !p.op || special;
   $('penOpacityNote').hidden = !(p.op && isWhite(p.c)) || special;
 }
@@ -2102,10 +2261,11 @@ function drawPenPreview() {
   ctx.fillRect(0, 0, cv.width, cv.height);
   const s = previewScale();
   const st = penStroke(p);
-  if (st.x) {
-    // 文字ペン: フチが見えるよう、背景に斜線(下書きの絵の代わり)を引く
-    ctx.strokeStyle = '#b9bfc5';
-    ctx.lineWidth = Math.max(1, 3 * s);
+  if (st.x || st.s || st.h) {
+    // 文字ペン: フチが見えるよう、背景に斜線(下書きの絵の代わり)を引く。
+    // 影ペン・白ペン: 線の上でどう見えるか分かるよう、濃い斜線を引く(影は線を残して暗く、白は線を隠す)
+    ctx.strokeStyle = st.x ? '#b9bfc5' : '#3d444b';
+    ctx.lineWidth = Math.max(1, (st.x ? 3 : 2.5) * s);
     ctx.beginPath();
     for (let x = -cv.height; x < cv.width; x += Math.max(8, 26 * s)) { ctx.moveTo(x, cv.height); ctx.lineTo(x + cv.height, 0); }
     ctx.stroke();
@@ -2115,6 +2275,21 @@ function drawPenPreview() {
   const plain = { ...st, x: 0, b: 0 };
   const done = [];
   const drawOne = (pts, last) => {
+    if (st.s || st.h) {
+      // 影(乗算)・白(ぼかし・濃さ・粒)は、保存するときと同じ形のストロークにして描く。
+      // スプレーの粒は決まった並びの乱数で作るので、描き直しても動かない
+      let q;
+      if (st.k === 'd') {
+        const sp = sprayer(p, seededRandom(done.length * 7919 + 17));
+        for (const a of pts) sp.add(a[0], a[1], a[2]);
+        q = { ...st, p: new Float32Array(sp.dots) };
+      } else {
+        q = { ...st, p: new Float32Array(pts.flat()) };
+      }
+      if (q.p.length) drawStroke(ctx, q);
+      done.push(pts);
+      return;
+    }
     drawLiveStroke(ctx, st, pts, last, () => { for (const q of done) drawLiveStroke(ctx, plain, q, true); });
     done.push(pts);
   };
@@ -2201,16 +2376,22 @@ $('eraserSize').addEventListener('input', (e) => {
 function openFillDialog() {
   const sw = $('fillColors');
   sw.innerHTML = '';
-  for (const col of COLORS) {
+  const L = settings.fill.layer;
+  const cur = fillColor();
+  for (const col of L === 's' ? SHADOW_COLORS : COLORS) {
     const b = document.createElement('button');
     b.type = 'button';
-    b.className = 'swatch' + (col.toLowerCase() === settings.fill.c.toLowerCase() ? ' active' : '');
+    b.className = 'swatch' + (col.toLowerCase() === cur.toLowerCase() ? ' active' : '');
     b.style.background = col;
     b.title = col;
-    b.addEventListener('click', () => { setFill({ c: col }); openFillDialog(); });
+    b.addEventListener('click', () => { setFillColor(col); openFillDialog(); });
     sw.appendChild(b);
   }
-  $('fillColorInput').value = settings.fill.c;
+  // 白に塗るときは色を選ばない。影に塗るときは影ペンの色を変える
+  sw.hidden = $('fillColorRow').hidden = L === 'h';
+  $('fillColorNote').textContent = L === 's' ? '影の色（影ペンと同じ色を使う。白に近いほど薄い影）' : L === 'h' ? '白に塗る（色は白で決まり）' : '';
+  $('fillColorNote').hidden = L !== 's' && L !== 'h';
+  $('fillColorInput').value = cur;
   $('fillExpand').value = settings.fill.e;
   $('fillExpandOut').textContent = settings.fill.e;
   for (const r of document.querySelectorAll('input[name=fillLayer]')) r.checked = r.value === settings.fill.layer;
@@ -2219,11 +2400,11 @@ function openFillDialog() {
   if (!$('fillDlg').open) $('fillDlg').showModal();
 }
 function syncFillRef() {
-  $('fillRefBox').hidden = settings.fill.layer !== 'u';
+  $('fillRefBox').hidden = !fillUsesRef(settings.fill.layer);
   $('fillModeNote').textContent = `今: ${fillModeName()}`;
 }
 for (const r of document.querySelectorAll('input[name=fillLayer]')) {
-  r.addEventListener('change', () => { setFill({ layer: r.value }); syncFillRef(); });
+  r.addEventListener('change', () => { setFill({ layer: r.value }); openFillDialog(); });
 }
 for (const k of FILL_LAYERS) {
   $('fillRef_' + k).addEventListener('change', (e) => {
@@ -2236,7 +2417,14 @@ function setFill(patch) {
   saveSettings();
   renderDock();
 }
-$('fillColorInput').addEventListener('input', (e) => setFill({ c: e.target.value }));
+/** 塗りつぶしの色を変える。影に塗るときは影ペンの色を変える(白は変えない) */
+function setFillColor(c) {
+  const L = settings.fill.layer;
+  if (L === 'h') return;
+  if (L === 's') { settings.shadowPen.c = c; saveSettings(); renderDock(); return; }
+  setFill({ c });
+}
+$('fillColorInput').addEventListener('input', (e) => setFillColor(e.target.value));
 $('fillColorInput').addEventListener('change', () => openFillDialog());
 $('fillExpand').addEventListener('input', (e) => {
   const v = Number(e.target.value);
