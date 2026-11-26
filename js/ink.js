@@ -6,8 +6,13 @@
               x?:1 なら文字ペンの線(オートレイヤー: いつも一番上に描く), b?:文字ペンのフチの太さ(page-px),
               k?:'f' なら塗り(バケツ)。p は輪郭の点列で、筆圧の欄が1の点から新しい輪郭が始まる。w=0
               k?:'i' なら画像。p は四隅の点(左上・右上・右下・左下)、img に画像のBlob(作品の中に持つ)。w=0
-              u?:1 なら塗りペンの線(オートレイヤー: いつも一番下に描く) }
-   - 重なり順は 塗りペン(u) → ふつうの線・塗り・画像 → 文字ペン(x)。配列もこの順に並べておく(addStrokes)
+              u?:1 なら塗りペンの線(オートレイヤー: いつも一番下に描く),
+              s?:1 なら影(影ペン・影の塗り)。線画の上に乗算で重ねる,
+              h?:1 なら白(白ペン・白の塗り)。線画・影の上、文字の下に描く,
+              k?:'d' ならスプレーの粒。p は [x, y, 粒の半径/(w/2), …]、w はスプレーの直径,
+              bl?:ぼかし(page-px。ブラウザの blur の半径), a?:濃さ(0..1。半透明で重ねる) }
+   - レイヤー(段)は 塗り(u) → 影(s) → 線画(ふつうの線・塗り・画像) → 白(h) → 文字(x)。配列もこの順に並べておく(addStrokes)。
+     描くときは 塗り → 線画 → 影(乗算) → 白 → 文字 の順(影は線画の後に乗算で重ねるので、黒い線は黒いまま残る)
    - 文字ペンの線は、ほかの線・塗りより必ず上に描く。フチ(白)を全部描いてから中身を描くので、
      フチが隣の文字を隠さない。配列の中でも文字ペンの線は後ろにまとめる(addStrokes)
    - 点列はページ座標(0..W, 0..H)。手ブレ補正は入力時に済ませた後の座標を保存する
@@ -209,33 +214,33 @@ function drawBorder(ctx, path, b) {
   ctx.stroke(path);
 }
 
+/** レイヤー(段)の番号。配列はこの順に並べる: 塗り0 / 影1 / 線画2 / 白3 / 文字4 */
+export const bandOf = (st) => (st.u ? 0 : st.s ? 1 : st.h ? 3 : st.x ? 4 : 2);
+const DRAW_ORDER = [0, 2, 1, 3]; // 描く順(文字は最後に別扱い)。影は線画の後に乗算で重ねる
+
 /** 線の並びを描く。文字ペンの線は最後に、フチ → 中身 の順でまとめて描く。
  *  skip: 描かない線の Set(動かしている最中の線など) */
 export function drawStrokes(ctx, strokes, thicken = 0, skip = null) {
-  let text = null, mid = null;
+  const bands = [null, null, null, null, null];
   for (const st of strokes) {
     if (skip && skip.has(st)) continue;
-    if (st.x) (text ||= []).push(st);
-    else if (st.u) drawStroke(ctx, st, thicken); // 塗りペンは一番下
-    else (mid ||= []).push(st);
+    (bands[bandOf(st)] ||= []).push(st);
   }
-  if (mid) for (const st of mid) drawStroke(ctx, st, thicken);
+  for (const b of DRAW_ORDER) if (bands[b]) for (const st of bands[b]) drawStroke(ctx, st, thicken);
+  const text = bands[4];
   if (!text) return;
   // 文字レイヤーの塗り(フキダシの中など)は文字より下に。文字の線が塗りに隠れないように
   for (const st of text) if (st.k === 'f') drawStroke(ctx, st, thicken);
   for (const st of text) if (st.b > 0 && st.k !== 'f') drawBorder(ctx, strokePath(st), st.b);
   for (const st of text) if (st.k !== 'f') drawStroke(ctx, st, thicken);
 }
-/** 新しい線を足した配列を返す。並びは [塗りペン… | ふつう… | 文字ペン…] に保つ。
- *  それぞれの段のいちばん上に入れる。bottom=true なら、ふつうの線は段のいちばん下(塗りペンのすぐ上)に入れる */
+/** 新しい線を足した配列を返す。並びは [塗り | 影 | 線画 | 白 | 文字] に保つ。
+ *  それぞれの段のいちばん上に入れる。bottom=true なら段のいちばん下に入れる(背面へ・画像の取り込み) */
 export function addStrokes(arr, news, bottom = false) {
-  let a = 0;
-  while (a < arr.length && arr[a].u) a++;
-  let b = arr.length;
-  while (b > a && arr[b - 1].x) b--;
-  const U = news.filter((s) => s.u), X = news.filter((s) => s.x), N = news.filter((s) => !s.u && !s.x);
-  const mid = arr.slice(a, b);
-  return arr.slice(0, a).concat(U, bottom ? N.concat(mid) : mid.concat(N), arr.slice(b), X);
+  const bands = [[], [], [], [], []], add = [[], [], [], [], []];
+  for (const st of arr) bands[bandOf(st)].push(st);
+  for (const st of news) add[bandOf(st)].push(st);
+  return bands.flatMap((b, i) => (bottom ? add[i].concat(b) : b.concat(add[i])));
 }
 
 /* ---- 画像 ----
@@ -281,8 +286,30 @@ export function makeImage(blob, x0, y0, x1, y1) {
   return { c: '#000000', w: 0, t: 0, k: 'i', img: blob, p: new Float32Array([x0, y0, 0, x1, y0, 0, x1, y1, 0, x0, y1, 0]) };
 }
 
-/** thicken: 輪郭をこの太さで縁取って太らせる(縮小サムネ用) */
+/** 今の変換行列の倍率(page-px → canvas-px) */
+const scaleOf = (ctx) => { const m = ctx.getTransform(); return Math.hypot(m.a, m.b); };
+const hasStyle = (st) => st.s || st.bl > 0 || (st.a !== undefined && st.a < 1);
+
+/** thicken: 輪郭をこの太さで縁取って太らせる(縮小サムネ用)。
+ *  影は乗算で重ねる。ぼかしはブラウザの blur で(変換行列が効かないので倍率を掛ける)。濃さは半透明で */
 export function drawStroke(ctx, st, thicken = 0) {
+  if (!hasStyle(st)) { drawBody(ctx, st, thicken); return; }
+  ctx.save();
+  if (st.s) ctx.globalCompositeOperation = 'multiply';
+  if (st.a !== undefined && st.a < 1) ctx.globalAlpha *= Math.max(0, st.a);
+  if (st.bl > 0) {
+    const r = st.bl * scaleOf(ctx);
+    if (r >= 0.3) ctx.filter = `blur(${r.toFixed(2)}px)`;
+  }
+  drawBody(ctx, st, thicken);
+  ctx.restore();
+}
+function drawBody(ctx, st, thicken) {
+  if (st.k === 'd') {
+    ctx.fillStyle = st.c;
+    ctx.fill(dotsPath(st));
+    return;
+  }
   if (st.k === 'i') {
     const [x0, y0, x1, y1] = imageRect(st);
     const bm = bitmapOf(st);
@@ -335,7 +362,7 @@ export function bbox(st) {
       if (x < x0) x0 = x; if (x > x1) x1 = x;
       if (y < y0) y0 = y; if (y > y1) y1 = y;
     }
-    const pad = st.w * 0.6 + 1 + (st.b || 0);
+    const pad = st.w * 0.6 + 1 + (st.b || 0) + (st.bl || 0) * 3; // ぼかしは半径の3倍まで広がる
     b = [x0 - pad, y0 - pad, x1 + pad, y1 + pad];
     bboxCache.set(st, b);
   }
@@ -359,6 +386,7 @@ export function hitStroke(st, x, y, r) {
   if (x + r < b[0] || x - r > b[2] || y + r < b[1] || y - r > b[3]) return false;
   if (st.k === 'f') return inFill(st, x, y) || fillEdgeNear(st, x, y, r);
   if (st.k === 'i') return true; // 外接矩形 = 画像の範囲
+  if (st.k === 'd') return dotsHit(st, x, y, r, 1) >= 0;
 
   const p = st.p;
   if (p.length === 3) {
@@ -378,6 +406,16 @@ export function hitStroke(st, x, y, r) {
 export function eraseSplit(st, x, y, r) {
   if (st.k === 'f' || st.k === 'i') return null; // 塗りの部分消しは別扱い(消しゴムを離したときに削る)。画像は消さない
   if (!hitStroke(st, x, y, r)) return null;
+  if (st.k === 'd') {
+    // スプレー: 円に入った粒だけを消す(残りの粒の位置は変わらない)
+    const p = st.p, R = st.w / 2, keep = [];
+    for (let i = 0; i < p.length; i += 3) {
+      const rr = r + p[i + 2] * R * 0.5;
+      if ((p[i] - x) ** 2 + (p[i + 1] - y) ** 2 > rr * rr) keep.push(p[i], p[i + 1], p[i + 2]);
+    }
+    if (keep.length === p.length) return null;
+    return keep.length ? [{ ...st, p: new Float32Array(keep) }] : [];
+  }
   const p = st.p;
   const step = Math.max(0.75, Math.min(r * 0.35, st.w * 0.35));
   const pieces = [];
@@ -479,7 +517,75 @@ export function transformStroke(st, ax, ay, s, dx, dy) {
     q[i + 2] = p[i + 2];
   }
   const out = { ...st, p: q };
-  if (s !== 1 && !st.k) out.w = Math.max(0.3, Math.round(st.w * s * 100) / 100);
+  // スプレーの粒の大きさは w に対する割合で持っているので、w を変えれば粒も一緒に変わる
+  if (s !== 1 && (!st.k || st.k === 'd')) out.w = Math.max(0.3, Math.round(st.w * s * 100) / 100);
   if (s !== 1 && st.b) out.b = Math.round(st.b * s * 100) / 100;
+  if (s !== 1 && st.bl) out.bl = Math.round(st.bl * s * 100) / 100;
   return out;
+}
+
+/* ---- スプレー(粒) ----
+   粒は描いたときに位置と大きさを決めて保存する(乱数を使うのは入力のときだけ)。
+   手ブレ補正を入力時にかけているのと同じ考え方で、移動・拡大縮小・同期で模様が変わらず、
+   部分消しは「円に入った粒を消す」だけになる */
+const SPRAY_MAX = 30000; // 1本の線の粒の上限(描画とファイルが重くなりすぎないように)
+const dotsCache = new WeakMap();
+function dotsPath(st) {
+  let path = dotsCache.get(st);
+  if (!path) {
+    path = new Path2D();
+    const p = st.p, R = st.w / 2;
+    for (let i = 0; i < p.length; i += 3) addCircle(path, p[i], p[i + 1], Math.max(0.3, p[i + 2] * R));
+    dotsCache.set(st, path);
+  }
+  return path;
+}
+/** 描画中のスプレー: 粒の形(Path2D)を作り直さずに使わせる */
+export function primeDots(st, path) { dotsCache.set(st, path); }
+/** 円(x,y,r)に触れている粒の番号(無ければ -1)。k: 粒の大きさをどれだけ当たりに含めるか */
+function dotsHit(st, x, y, r, k) {
+  const p = st.p, R = st.w / 2;
+  for (let i = 0; i < p.length; i += 3) {
+    const rr = r + p[i + 2] * R * k;
+    if ((p[i] - x) ** 2 + (p[i + 1] - y) ** 2 <= rr * rr) return i;
+  }
+  return -1;
+}
+/** スプレーの粒を出す係。add(x, y, 筆圧) を呼ぶたびに、前の位置からの区間に粒を足していく。
+ *  pen: { w:直径, ds:粒の半径(page-px), dn:粒の量(1..10), pr:筆圧で量を変えるか } */
+export function sprayer(pen, rng = Math.random) {
+  const R = Math.max(1, pen.w / 2);
+  const rd = Math.min(R, Math.max(0.5, pen.ds ?? 3));
+  const cover = 0.035 * (pen.dn ?? 4);         // 1回なぞったときに粒で覆う割合の目安
+  const area = Math.PI * (rd * 0.7) ** 2;      // 粒1つの平均の面積
+  const dots = [];
+  const path = new Path2D(); // 描画中の表示用(粒を出すたびに足す)
+  let last = null, carry = 0;
+  return {
+    dots,
+    path,
+    add(x, y, p) {
+      const amount = pen.pr ? Math.max(0.08, p) : 1;
+      const len = last ? Math.hypot(x - last[0], y - last[1]) : R * 0.4; // 置いただけでも少し出す
+      carry += (cover * amount * len * 2 * R) / area;
+      let n = Math.floor(carry);
+      carry -= n;
+      n = Math.min(n, Math.max(0, SPRAY_MAX - dots.length / 3));
+      for (let i = 0; i < n; i++) {
+        const t = rng();
+        const cx = last ? last[0] + (x - last[0]) * t : x, cy = last ? last[1] + (y - last[1]) * t : y;
+        const ang = rng() * Math.PI * 2, d = R * Math.pow(rng(), 0.65); // 真ん中ほど少し密に
+        const px = cx + Math.cos(ang) * d, py = cy + Math.sin(ang) * d, q = Math.min(1, (rd * (0.35 + 0.65 * rng())) / R);
+        dots.push(px, py, q);
+        addCircle(path, px, py, Math.max(0.3, q * R));
+      }
+      last = [x, y];
+      return n;
+    },
+  };
+}
+/** 決まった並びの乱数(ペン設定の試し描きで、描き直しても粒が動かないように) */
+export function seededRandom(seed) {
+  let v = (seed >>> 0) || 1;
+  return () => { v ^= v << 13; v ^= v >>> 17; v ^= v << 5; return (v >>> 0) / 4294967296; };
 }

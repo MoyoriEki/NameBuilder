@@ -12,7 +12,7 @@
    - 競合(同じ作品を両方の端末で変えた): どちらも捨てない。
      Dropbox側の版を「（別端末の版）」として別作品に取り込み、こちらの版で上書きする
    ============================================================ */
-import * as db from './db.js?v=29';
+import * as db from './db.js?v=30';
 
 const BASE = '/NameBuilder';
 const PREFIX = 'namebuilder';
@@ -412,7 +412,9 @@ function uid(p) {
 
 /* ============================================================
    ページの線データの符号化(Dropbox用)
-   'NBP1' | u32 メタJSON長 | メタJSON([[色,太さ,筆圧の効き,濃さ|null,点数(, 真っ黒の筆圧, 濃さのカーブ(, 種類 'f'|'fu'|'fx'|'x'|'u'|'i', フチ(, 画像のバイト数, 画像の形式)))], …]) | 0埋め(偶数へ)
+   'NBP1' | u32 メタJSON長 | メタJSON([[色,太さ,筆圧の効き,濃さ|null,点数(, 真っ黒の筆圧, 濃さのカーブ(, 種類, フチ(, 画像のバイト数, 画像の形式(, おまけ{bl,a})))))], …]) | 0埋め(偶数へ)
+   種類: 線は レイヤーの文字('u'=塗り/'s'=影/'h'=白/'x'=文字、線画は無し)、塗りは 'f'+レイヤー('f'=線画/'fu'/'fs'/'fh'/'fx')、
+   スプレーは 'd'+レイヤー('dh' など)、画像は 'i'。おまけはぼかし(bl)・濃さ(a)。古い版は読み飛ばす
    | Int16 x,y(1/8 px 単位) × 点数 | Uint8 筆圧(0..255) × 点数 | 画像のバイト列(画像があれば、出てくる順に)
    これ全体を gzip して 'NBZ1' を前に付ける(CompressionStream が無い環境では生のまま)
    ============================================================ */
@@ -425,12 +427,19 @@ export async function encodePage(strokes) {
   // 6・7番目(真っ黒になる筆圧・濃さのカーブ)は後から足した。古い版は読み飛ばすだけなので互換
   const meta = strokes.map((s, i) => {
     const m = [s.c, s.w, s.t, s.o ?? null, s.p.length / 3];
-    // 8・9番目(種類 'f'=塗り/'x'=文字ペン/'u'=塗りペン/'i'=画像・文字ペンのフチ)、10・11番目(画像)も後から足した
-    // 塗りは置いてあるレイヤーも持つ: 'f'=線画 / 'fu'=塗り / 'fx'=文字
-    const kind = s.k === 'f' ? (s.u ? 'fu' : s.x ? 'fx' : 'f') : s.k === 'i' ? 'i' : s.x ? 'x' : s.u ? 'u' : null;
-    if (s.of !== undefined || s.og !== undefined || kind) m.push(s.of ?? null, s.og ?? null);
-    if (kind) m.push(kind, s.b ?? 0);
+    // 8・9番目(種類・文字ペンのフチ)、10・11番目(画像)、12番目(おまけ: ぼかし・濃さ)も後から足した
+    // 塗り・スプレーは置いてあるレイヤーも持つ: 'f'=線画 / 'fu'=塗り / 'fs'=影 / 'fh'=白 / 'fx'=文字
+    const lay = s.u ? 'u' : s.s ? 's' : s.h ? 'h' : s.x ? 'x' : '';
+    const kind = s.k === 'f' ? 'f' + lay : s.k === 'd' ? 'd' + lay : s.k === 'i' ? 'i' : lay || null;
+    const ext = {};
+    if (s.bl > 0) ext.bl = s.bl;
+    if (s.a !== undefined) ext.a = s.a;
+    const hasExt = Object.keys(ext).length > 0;
+    if (s.of !== undefined || s.og !== undefined || kind || hasExt) m.push(s.of ?? null, s.og ?? null);
+    if (kind || hasExt) m.push(kind, s.b ?? 0);
     if (kind === 'i') m.push(imgs[i]?.byteLength || 0, s.img?.type || 'image/webp');
+    else if (hasExt) m.push(0, null);
+    if (hasExt) m.push(ext);
     return m;
   });
   const imgBytes = imgs.reduce((a, b) => a + (b ? b.byteLength : 0), 0);
@@ -482,7 +491,7 @@ export async function decodePage(ab) {
   const strokes = [];
   let k = 0;
   let off = head + pad + n * 5;
-  for (const [c, w, t, o, cnt, of, og, kind, b, ilen, itype] of meta) {
+  for (const [c, w, t, o, cnt, of, og, kind, b, ilen, itype, ext] of meta) {
     const p = new Float32Array(cnt * 3);
     for (let i = 0; i < cnt; i++, k++) {
       p[i * 3] = xy[k * 2] / Q;
@@ -493,11 +502,18 @@ export async function decodePage(ab) {
     if (o !== null && o !== undefined) st.o = o;
     if (of !== null && of !== undefined) st.of = of;
     if (og !== null && og !== undefined) st.og = og;
-    if (kind === 'f' || kind === 'fu' || kind === 'fx') st.k = 'f';
-    if (kind === 'fu') st.u = 1;
-    if (kind === 'fx') { st.x = 1; st.b = 0; }
-    if (kind === 'x') { st.x = 1; st.b = b || 0; }
-    if (kind === 'u') st.u = 1;
+    if (kind && kind !== 'i') {
+      // 先頭が 'f'(塗り)・'d'(スプレー)なら種類、残りがレイヤー
+      const k0 = kind[0] === 'f' || kind[0] === 'd' ? kind[0] : '';
+      if (k0) st.k = k0;
+      const lay = kind.slice(k0.length);
+      if (lay === 'u') st.u = 1;
+      else if (lay === 's') st.s = 1;
+      else if (lay === 'h') st.h = 1;
+      else if (lay === 'x') { st.x = 1; st.b = k0 === 'f' ? 0 : b || 0; }
+    }
+    if (ext?.bl > 0) st.bl = ext.bl;
+    if (ext?.a !== undefined && ext.a !== null) st.a = ext.a;
     if (kind === 'i') {
       st.k = 'i';
       st.img = new Blob([buf.slice(off, off + ilen)], { type: itype || 'image/webp' });
